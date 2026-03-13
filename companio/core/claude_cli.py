@@ -48,12 +48,20 @@ _SECRET_EXACT = frozenset(
 
 _CLAUDE_PREFIXES = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE")
 
+# Env vars that must pass through despite matching secret/Claude patterns.
+# CLAUDE_CODE_OAUTH_TOKEN is required for headless Claude CLI auth (Max plan).
+_PASSTHROUGH_KEYS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+
 
 def _filtered_env() -> dict[str, str]:
     """Return a copy of os.environ with secrets and Claude internals removed."""
     result: dict[str, str] = {}
     for k, v in os.environ.items():
         upper = k.upper()
+        # Always allow explicitly whitelisted keys
+        if upper in _PASSTHROUGH_KEYS:
+            result[k] = v
+            continue
         # Remove CLAUDECODE*, CLAUDE_CODE_ENTRYPOINT, CLAUDE* env vars
         if any(upper.startswith(prefix) for prefix in _CLAUDE_PREFIXES):
             continue
