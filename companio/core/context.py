@@ -14,8 +14,9 @@ class ContextBuilder:
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, bot_name: str = "companio"):
         self.workspace = workspace
+        self.bot_name = bot_name
         self.memory = MemoryStore(workspace)
 
     def build_system_prompt(self) -> str:
@@ -61,9 +62,11 @@ class ContextBuilder:
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
-        return f"""# companio
+        name = self.bot_name
 
-You are companio, a helpful AI assistant.
+        return f"""# {name}
+
+You are {name}, a helpful AI assistant.
 
 ## Runtime
 {runtime}
@@ -76,7 +79,7 @@ Your workspace is at: {workspace_path}
 
 {platform_policy}
 
-## companio Guidelines
+## Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
 - Before modifying a file, read it first. Do not assume files or directories exist.
 - After writing or editing a file, re-read it if accuracy matters.

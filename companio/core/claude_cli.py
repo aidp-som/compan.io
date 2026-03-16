@@ -24,7 +24,7 @@ _SECRET_PATTERNS = frozenset(
         "OPENAI_",
         "GOOGLE_",
         "GEMINI_",
-        "TELEGRAM_",
+        "TELEGRAM_BOT_TOKEN",
         "AWS_",
         "AZURE_",
         "STRIPE_",

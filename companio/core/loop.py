@@ -32,6 +32,7 @@ class AgentLoop:
         claude: ClaudeCLI,
         workspace: Path,
         memory_window: int = 200,
+        bot_name: str = "companio",
         cron_service: CronService | None = None,
         session_manager: SessionManager | None = None,
     ):
@@ -40,7 +41,7 @@ class AgentLoop:
         self.workspace = workspace
         self.memory_window = memory_window
         self.cron_service = cron_service
-        self.context = ContextBuilder(workspace)
+        self.context = ContextBuilder(workspace, bot_name=bot_name)
         self._session_manager = session_manager or SessionManager(workspace)
         self.message_sender = MessageSender(send_callback=bus.publish_outbound)
         self._running = False

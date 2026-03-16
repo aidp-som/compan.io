@@ -391,6 +391,7 @@ def gateway(
         claude=claude,
         workspace=config.workspace_path,
         memory_window=config.agents.defaults.memory_window,
+        bot_name=config.agents.defaults.bot_name,
         cron_service=cron,
         session_manager=session_manager,
     )
@@ -519,6 +520,7 @@ def agent(
         claude=claude,
         workspace=config.workspace_path,
         memory_window=config.agents.defaults.memory_window,
+        bot_name=config.agents.defaults.bot_name,
         cron_service=cron,
     )
 
