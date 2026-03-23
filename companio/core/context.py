@@ -103,13 +103,15 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if metadata:
             if metadata.get("is_group"):
                 lines.append("Chat Type: group")
-                sender_parts = []
-                if metadata.get("first_name"):
-                    sender_parts.append(metadata["first_name"])
-                if metadata.get("username"):
-                    sender_parts.append(f"@{metadata['username']}")
-                if sender_parts:
-                    lines.append(f"Sender: {' '.join(sender_parts)}")
+            sender_parts = []
+            if metadata.get("first_name"):
+                sender_parts.append(metadata["first_name"])
+            if metadata.get("username"):
+                sender_parts.append(f"@{metadata['username']}")
+            if sender_parts:
+                lines.append(f"Sender: {' '.join(sender_parts)}")
+            if metadata.get("role_name"):
+                lines.append(f"Role: {metadata['role_name']}")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:

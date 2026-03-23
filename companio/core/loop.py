@@ -58,10 +58,10 @@ class AgentLoop:
         # Track cumulative cost per session key for per-turn diff
         self._claude_session_costs: dict[str, float] = {}
 
-    def _resolve_role(self, sender_id: str) -> RoleConfig | None:
-        """Resolve the sender's role config. Returns None if no role system configured."""
+    def _resolve_role(self, sender_id: str) -> tuple[str | None, RoleConfig | None]:
+        """Resolve the sender's role name and config. Returns (None, None) if no role system configured."""
         if not self._config or not self._config.roles:
-            return None  # No roles configured — full access (backwards compatible)
+            return None, None  # No roles configured — full access (backwards compatible)
 
         # Try exact match first, then pipe-split parts (telegram "id|username" format)
         role_name = self._config.user_roles.get(sender_id)
@@ -72,9 +72,9 @@ class AgentLoop:
             role_name = self._config.default_role
 
         if not role_name:
-            return None  # No default role — deny access handled by ACL
+            return None, None  # No default role — deny access handled by ACL
 
-        return self._config.roles.get(role_name)
+        return role_name, self._config.roles.get(role_name)
 
     async def run(self) -> None:
         """Main loop - consume messages from bus."""
@@ -176,13 +176,16 @@ class AgentLoop:
         )
 
         # Resolve role-based tool restrictions
-        role = self._resolve_role(msg.sender_id)
+        role_name, role = self._resolve_role(msg.sender_id)
         role_tools: dict = {}
         if role:
             if role.allowed_tools is not None:
                 role_tools["allowed_tools"] = role.allowed_tools
             if role.disallowed_tools is not None:
                 role_tools["disallowed_tools"] = role.disallowed_tools
+        # Inject role name into metadata for runtime context
+        if role_name and msg.metadata is not None:
+            msg.metadata["role_name"] = role_name
 
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)
