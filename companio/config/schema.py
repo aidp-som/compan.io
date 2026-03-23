@@ -31,6 +31,7 @@ class RoleConfig(Base):
     description: str = ""
     allowed_tools: list[str] | None = None  # None = all tools allowed
     disallowed_tools: list[str] | None = None  # None = no tools blocked
+    role_prompt: str | None = None  # Injected into system prompt for behavioral rules
 
 
 class ChannelsConfig(Base):

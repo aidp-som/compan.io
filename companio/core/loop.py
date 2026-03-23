@@ -183,9 +183,11 @@ class AgentLoop:
                 role_tools["allowed_tools"] = role.allowed_tools
             if role.disallowed_tools is not None:
                 role_tools["disallowed_tools"] = role.disallowed_tools
-        # Inject role name into metadata for runtime context
+        # Inject role info into metadata for runtime context
         if role_name and msg.metadata is not None:
             msg.metadata["role_name"] = role_name
+            if role and role.role_prompt:
+                msg.metadata["role_prompt"] = role.role_prompt
 
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)

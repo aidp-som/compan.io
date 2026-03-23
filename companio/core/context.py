@@ -112,6 +112,8 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 lines.append(f"Sender: {' '.join(sender_parts)}")
             if metadata.get("role_name"):
                 lines.append(f"Role: {metadata['role_name']}")
+            if metadata.get("role_prompt"):
+                lines.append(f"\n## Role Instructions\n{metadata['role_prompt']}")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
