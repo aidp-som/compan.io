@@ -1,5 +1,6 @@
 """Context builder for assembling agent prompts."""
 
+import os
 import platform
 import time
 from datetime import datetime
@@ -114,6 +115,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 lines.append(f"Role: {metadata['role_name']}")
             if metadata.get("role_prompt"):
                 lines.append(f"\n## Role Instructions\n{metadata['role_prompt']}")
+        # Git repo info from environment
+        git_repo = os.environ.get("GIT_REPO_URL")
+        if git_repo:
+            lines.append(f"\n## Connected Git Repository")
+            lines.append(f"Repo: {git_repo}")
+            lines.append("SSH 접근 가능 (Deploy Key 등록됨). 작업 시 반드시 feature 브랜치를 생성하고 main에 직접 push하지 마세요.")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
