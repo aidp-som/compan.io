@@ -25,6 +25,14 @@ class TelegramConfig(Base):
     reply_to_message: bool = False  # If true, bot replies quote the original message
 
 
+class RoleConfig(Base):
+    """Tool access control role definition."""
+
+    description: str = ""
+    allowed_tools: list[str] | None = None  # None = all tools allowed
+    disallowed_tools: list[str] | None = None  # None = no tools blocked
+
+
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
@@ -69,6 +77,9 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     claude: ClaudeCLIConfig = Field(default_factory=ClaudeCLIConfig)
+    roles: dict[str, RoleConfig] = Field(default_factory=dict)
+    user_roles: dict[str, str] = Field(default_factory=dict)  # sender_id/username -> role name
+    default_role: str | None = None  # role for unlisted users; None = deny access
 
     @property
     def workspace_path(self) -> Path:

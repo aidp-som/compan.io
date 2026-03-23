@@ -22,6 +22,8 @@ from companio.tools.message import MessageSender
 if TYPE_CHECKING:
     from companio.cron import CronService
 
+from companio.config.schema import Config, RoleConfig
+
 
 class AgentLoop:
     """Delegates processing to Claude CLI subprocess."""
@@ -35,6 +37,7 @@ class AgentLoop:
         bot_name: str = "companio",
         cron_service: CronService | None = None,
         session_manager: SessionManager | None = None,
+        config: Config | None = None,
     ):
         self.bus = bus
         self.claude = claude
@@ -43,6 +46,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.context = ContextBuilder(workspace, bot_name=bot_name)
         self._session_manager = session_manager or SessionManager(workspace)
+        self._config = config
         self.message_sender = MessageSender(send_callback=bus.publish_outbound)
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
@@ -53,6 +57,24 @@ class AgentLoop:
         self._claude_session_ids: dict[str, str] = {}
         # Track cumulative cost per session key for per-turn diff
         self._claude_session_costs: dict[str, float] = {}
+
+    def _resolve_role(self, sender_id: str) -> RoleConfig | None:
+        """Resolve the sender's role config. Returns None if no role system configured."""
+        if not self._config or not self._config.roles:
+            return None  # No roles configured — full access (backwards compatible)
+
+        # Try exact match first, then pipe-split parts (telegram "id|username" format)
+        role_name = self._config.user_roles.get(sender_id)
+        if not role_name and "|" in sender_id:
+            sid, username = sender_id.split("|", 1)
+            role_name = self._config.user_roles.get(sid) or self._config.user_roles.get(username)
+        if not role_name:
+            role_name = self._config.default_role
+
+        if not role_name:
+            return None  # No default role — deny access handled by ACL
+
+        return self._config.roles.get(role_name)
 
     async def run(self) -> None:
         """Main loop - consume messages from bus."""
@@ -153,6 +175,15 @@ class AgentLoop:
             )
         )
 
+        # Resolve role-based tool restrictions
+        role = self._resolve_role(msg.sender_id)
+        role_tools: dict = {}
+        if role:
+            if role.allowed_tools is not None:
+                role_tools["allowed_tools"] = role.allowed_tools
+            if role.disallowed_tools is not None:
+                role_tools["disallowed_tools"] = role.disallowed_tools
+
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)
 
@@ -162,6 +193,7 @@ class AgentLoop:
             full_message = f"{runtime_ctx}\n\n{msg.content}"
             response = await self.claude.run(
                 message=full_message, resume_session_id=claude_sid,
+                **role_tools,
             )
         else:
             # First call — write CLAUDE.md and inject history if available
@@ -178,6 +210,7 @@ class AgentLoop:
             response = await self.claude.run(
                 message=full_message,
                 session_id=new_session_id,
+                **role_tools,
             )
 
         # Log Claude CLI response stats

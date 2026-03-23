@@ -98,6 +98,17 @@ class BaseChannel(ABC):
                 sender_id,
                 self.name,
             )
+            # Send denial message so the user knows they are blocked
+            try:
+                await self.send(
+                    OutboundMessage(
+                        channel=self.name,
+                        chat_id=str(chat_id),
+                        text="접근 권한이 없습니다. 관리자에게 문의하세요.",
+                    )
+                )
+            except Exception:
+                logger.debug("Failed to send access-denied reply on {}", self.name)
             return
 
         msg = InboundMessage(

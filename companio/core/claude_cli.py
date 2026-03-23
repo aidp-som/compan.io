@@ -169,6 +169,8 @@ class ClaudeCLI:
         *,
         session_id: str | None = None,
         resume_session_id: str | None = None,
+        allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
     ) -> list[str]:
         """Build the claude CLI command list.
 
@@ -178,6 +180,8 @@ class ClaudeCLI:
         Args:
             session_id: Create a new session with this UUID (first call).
             resume_session_id: Resume an existing session by ID (subsequent calls).
+            allowed_tools: Whitelist of tools (role-based access control).
+            disallowed_tools: Blacklist of tools (role-based access control).
         """
         cmd = ["claude", "-p", "--output-format", "json"]
         cmd.extend(["--max-turns", str(self.max_turns)])
@@ -190,6 +194,12 @@ class ClaudeCLI:
             cmd.extend(["--resume", resume_session_id])
         elif session_id:
             cmd.extend(["--session-id", session_id])
+
+        # Role-based tool restrictions
+        if allowed_tools:
+            cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+        if disallowed_tools:
+            cmd.extend(["--disallowedTools", ",".join(disallowed_tools)])
 
         # Always skip permissions — companio runs as an autonomous agent
         cmd.append("--dangerously-skip-permissions")
@@ -258,6 +268,8 @@ class ClaudeCLI:
         *,
         session_id: str | None = None,
         resume_session_id: str | None = None,
+        allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
     ) -> ClaudeResponse:
         """Run a message through the Claude CLI and return parsed response.
 
@@ -267,8 +279,15 @@ class ClaudeCLI:
             message: User message (passed via stdin).
             session_id: Create session with this UUID (first call).
             resume_session_id: Resume existing session (subsequent calls).
+            allowed_tools: Whitelist of tools (role-based access control).
+            disallowed_tools: Blacklist of tools (role-based access control).
         """
-        cmd = self._build_cmd(session_id=session_id, resume_session_id=resume_session_id)
+        cmd = self._build_cmd(
+            session_id=session_id,
+            resume_session_id=resume_session_id,
+            allowed_tools=allowed_tools,
+            disallowed_tools=disallowed_tools,
+        )
         logger.debug("Running Claude CLI: {}", " ".join(cmd))
 
         async with self._semaphore:

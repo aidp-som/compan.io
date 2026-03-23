@@ -609,6 +609,23 @@ class TelegramChannel(BaseChannel):
         if media_group_id := getattr(message, "media_group_id", None):
             key = f"{str_chat_id}:{media_group_id}"
             if key not in self._media_group_buffers:
+                # Check ACL before buffering media group
+                skip_acl = metadata.get("is_group", False)
+                if not skip_acl and not self.is_allowed(sender_id):
+                    logger.warning(
+                        "Access denied for sender {} on channel {}.",
+                        sender_id,
+                        self.name,
+                    )
+                    if self._app:
+                        try:
+                            await self._app.bot.send_message(
+                                chat_id=int(str_chat_id),
+                                text="접근 권한이 없습니다. 관리자에게 문의하세요.",
+                            )
+                        except Exception:
+                            logger.debug("Failed to send access-denied message to {}", str_chat_id)
+                    return
                 self._media_group_buffers[key] = {
                     "sender_id": sender_id,
                     "chat_id": str_chat_id,
@@ -626,6 +643,25 @@ class TelegramChannel(BaseChannel):
                 self._media_group_tasks[key] = asyncio.create_task(self._flush_media_group(key))
             return
 
+        # Check ACL before starting typing indicator (non-group only)
+        skip_acl = metadata.get("is_group", False)
+        if not skip_acl and not self.is_allowed(sender_id):
+            logger.warning(
+                "Access denied for sender {} on channel {}. "
+                "Add them to allowFrom list in config to grant access.",
+                sender_id,
+                self.name,
+            )
+            if self._app:
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=int(str_chat_id),
+                        text="접근 권한이 없습니다. 관리자에게 문의하세요.",
+                    )
+                except Exception:
+                    logger.debug("Failed to send access-denied message to {}", str_chat_id)
+            return
+
         # Start typing indicator before processing
         self._start_typing(str_chat_id)
 
@@ -637,7 +673,7 @@ class TelegramChannel(BaseChannel):
             media=media_paths,
             metadata=metadata,
             session_key=session_key,
-            skip_acl=metadata.get("is_group", False),
+            skip_acl=skip_acl,
         )
 
     async def _flush_media_group(self, key: str) -> None:

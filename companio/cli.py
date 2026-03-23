@@ -394,6 +394,7 @@ def gateway(
         bot_name=config.agents.defaults.bot_name,
         cron_service=cron,
         session_manager=session_manager,
+        config=config,
     )
 
     # Set cron callback (needs agent)
@@ -522,6 +523,7 @@ def agent(
         memory_window=config.agents.defaults.memory_window,
         bot_name=config.agents.defaults.bot_name,
         cron_service=cron,
+        config=config,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
