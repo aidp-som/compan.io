@@ -189,65 +189,34 @@ class AgentLoop:
             if role and role.role_prompt:
                 msg.metadata["role_prompt"] = role.role_prompt
 
-        # Periodic progress reporter — sends elapsed time every 30s during CLI execution
-        progress_stop = asyncio.Event()
-
-        async def _report_progress():
-            elapsed = 0
-            while not progress_stop.is_set():
-                try:
-                    await asyncio.wait_for(progress_stop.wait(), timeout=30)
-                    break  # stop event was set
-                except asyncio.TimeoutError:
-                    elapsed += 30
-                    mins, secs = divmod(elapsed, 60)
-                    time_str = f"{mins}분 {secs}초" if mins else f"{secs}초"
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=msg.channel, chat_id=msg.chat_id,
-                            content=f"작업 중... ({time_str} 경과)",
-                            metadata={"_progress": True},
-                        )
-                    )
-
-        progress_task = asyncio.create_task(_report_progress())
-
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)
 
-        try:
-            if claude_sid:
-                # Resume existing session — no system prompt or history needed
-                runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
-                full_message = f"{runtime_ctx}\n\n{msg.content}"
-                response = await self.claude.run(
-                    message=full_message, resume_session_id=claude_sid,
-                    **role_tools,
-                )
-            else:
-                # First call — write CLAUDE.md and inject history if available
-                self.context.write_claude_md(self.claude.project_dir)
-                runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
-                history_text = ContextBuilder.format_history(session.messages[-self.memory_window:])
+        if claude_sid:
+            # Resume existing session — no system prompt or history needed
+            runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
+            full_message = f"{runtime_ctx}\n\n{msg.content}"
+            response = await self.claude.run(
+                message=full_message, resume_session_id=claude_sid,
+                **role_tools,
+            )
+        else:
+            # First call — write CLAUDE.md and inject history if available
+            self.context.write_claude_md(self.claude.project_dir)
+            runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
+            history_text = ContextBuilder.format_history(session.messages[-self.memory_window:])
 
-                full_message = f"{runtime_ctx}\n\n"
-                if history_text:
-                    full_message += f"## Recent Conversation\n{history_text}\n\n"
-                full_message += f"## Current Message\n{msg.content}"
+            full_message = f"{runtime_ctx}\n\n"
+            if history_text:
+                full_message += f"## Recent Conversation\n{history_text}\n\n"
+            full_message += f"## Current Message\n{msg.content}"
 
-                new_session_id = str(uuid.uuid4())
-                response = await self.claude.run(
-                    message=full_message,
-                    session_id=new_session_id,
-                    **role_tools,
-                )
-        finally:
-            progress_stop.set()
-            progress_task.cancel()
-            try:
-                await progress_task
-            except asyncio.CancelledError:
-                pass
+            new_session_id = str(uuid.uuid4())
+            response = await self.claude.run(
+                message=full_message,
+                session_id=new_session_id,
+                **role_tools,
+            )
 
         # Log Claude CLI response stats
         is_resume = claude_sid is not None
