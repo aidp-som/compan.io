@@ -6,7 +6,7 @@ Telegram 등 채팅 채널에서 메시지를 받아 Claude Code(`claude -p`)를
 파일 읽기/쓰기, 웹 검색, 코드 실행 등 모든 도구는 Claude Code가 자체적으로 처리합니다.
 companio는 메시지 라우팅, 세션 관리, 메모리, 크론 스케줄링만 담당합니다.
 
-> **macOS 전용** — Claude Code CLI가 현재 macOS만 지원하므로 companio도 macOS에서만 동작합니다.
+> **macOS / Linux / Windows(WSL2)** — Claude Code CLI가 macOS와 Linux를 지원합니다. Windows는 WSL2 또는 Docker Desktop을 통해 사용할 수 있습니다.
 
 ---
 
@@ -26,7 +26,7 @@ companio는 메시지 라우팅, 세션 관리, 메모리, 크론 스케줄링�
 
 ## 요구사항
 
-- macOS
+- macOS 또는 Linux (Windows는 WSL2 / Docker Desktop 사용)
 - Python 3.11 이상
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 설치 및 인증 완료
 
@@ -101,6 +101,48 @@ companio onboard
 pytest
 ruff check .
 mypy companio
+```
+
+### Windows에서 사용하기
+
+Windows는 Claude Code CLI를 직접 지원하지 않으므로 아래 두 가지 방법 중 하나를 사용하세요.
+
+#### 방법 1: WSL2 (권장)
+
+WSL2는 Windows에서 Linux 환경을 네이티브로 실행합니다.
+
+**WSL2 설치 (PowerShell 관리자 권한):**
+
+```powershell
+wsl --install
+```
+
+재부팅 후 Ubuntu 터미널을 열고:
+
+```bash
+# WSL2 홈 디렉토리에 클론 (Windows 파일시스템 /mnt/c/ 사용 시 성능 저하)
+git clone https://github.com/yonggill/compan.io.git ~/compan.io
+cd ~/compan.io
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+companio onboard
+```
+
+#### 방법 2: Docker Desktop
+
+```bash
+# 프로젝트 루트에서
+docker run -it --rm \
+  -v ~/.companio:/root/.companio \
+  -e ANTHROPIC_API_KEY=your_key \
+  python:3.11 bash
+
+# 컨테이너 내부에서
+pip install -e .
+companio gateway
 ```
 
 ---
