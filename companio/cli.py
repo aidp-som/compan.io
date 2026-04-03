@@ -373,6 +373,7 @@ def gateway(
 
     claude = ClaudeCLI(
         project_dir=get_claude_project_dir(),
+        workspace_dir=config.workspace_path,
         max_turns=config.claude.max_turns,
         timeout=config.claude.timeout,
         max_concurrent=config.claude.max_concurrent,
@@ -501,6 +502,7 @@ def agent(
 
     claude = ClaudeCLI(
         project_dir=get_claude_project_dir(),
+        workspace_dir=config.workspace_path,
         max_turns=config.claude.max_turns,
         timeout=config.claude.timeout,
         max_concurrent=config.claude.max_concurrent,

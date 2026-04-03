@@ -52,6 +52,17 @@ class SessionManager:
     );
     CREATE INDEX IF NOT EXISTS idx_messages_session
         ON messages(session_id);
+    CREATE TABLE IF NOT EXISTS telegram_users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        chat_id INTEGER,
+        chat_title TEXT,
+        chat_type TEXT,
+        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
     """
 
     _MIGRATIONS = [

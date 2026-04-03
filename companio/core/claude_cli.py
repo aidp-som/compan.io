@@ -153,12 +153,14 @@ class ClaudeCLI:
         self,
         *,
         project_dir: Path,
+        workspace_dir: Path | None = None,
         max_turns: int = 50,
         timeout: int = 300,
         max_concurrent: int = 5,
         model: str | None = None,
     ) -> None:
         self.project_dir = project_dir
+        self.workspace_dir = workspace_dir
         self.max_turns = max_turns
         self.timeout = timeout
         self.model = model
@@ -185,7 +187,8 @@ class ClaudeCLI:
         """
         cmd = ["claude", "-p", "--output-format", "json"]
         cmd.extend(["--max-turns", str(self.max_turns)])
-        cmd.extend(["--add-dir", str(Path.home())])
+        if self.workspace_dir:
+            cmd.extend(["--add-dir", str(self.workspace_dir)])
 
         if self.model:
             cmd.extend(["--model", self.model])

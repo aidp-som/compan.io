@@ -41,6 +41,7 @@ class ChannelManager:
                 self.channels["telegram"] = TelegramChannel(
                     self.config.channels.telegram,
                     self.bus,
+                    workspace=self.config.workspace_path,
                 )
                 logger.info("Telegram channel enabled")
             except ImportError as e:
