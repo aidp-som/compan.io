@@ -57,6 +57,10 @@ class AgentLoop:
         self._claude_session_ids: dict[str, str] = {}
         # Track cumulative cost per session key for per-turn diff
         self._claude_session_costs: dict[str, float] = {}
+        # Idle consolidation timers
+        self._idle_timers: dict[str, asyncio.TimerHandle] = {}
+        self._idle_timeout = config.agents.defaults.idle_consolidation_timeout if config else 1800
+        self._idle_min_turns = config.agents.defaults.idle_consolidation_min_turns if config else 4
 
     def _resolve_role(self, sender_id: str) -> tuple[str | None, RoleConfig | None]:
         """Resolve the sender's role name and config. Returns (None, None) if no role system configured."""
@@ -106,6 +110,9 @@ class AgentLoop:
 
     def stop(self) -> None:
         self._running = False
+        for timer in self._idle_timers.values():
+            timer.cancel()
+        self._idle_timers.clear()
         logger.info("Agent loop stopping")
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
@@ -192,6 +199,19 @@ class AgentLoop:
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)
 
+        # Fallback to DB-persisted session ID
+        if not claude_sid and session.claude_session_id:
+            # TTL check: ignore sessions older than 4 hours
+            if session.claude_session_updated_at:
+                from datetime import timedelta
+                try:
+                    updated = datetime.fromisoformat(session.claude_session_updated_at)
+                    if datetime.now() - updated < timedelta(hours=4):
+                        claude_sid = session.claude_session_id
+                        logger.info("Restored Claude session {} from DB for {}", claude_sid, key)
+                except (ValueError, TypeError):
+                    pass
+
         if claude_sid:
             # Resume existing session — no system prompt or history needed
             runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
@@ -200,7 +220,15 @@ class AgentLoop:
                 message=full_message, resume_session_id=claude_sid,
                 **role_tools,
             )
-        else:
+            # Resume failed — fallback to new session
+            if response.is_error:
+                logger.warning("Resume failed for {}, creating new session", key)
+                self._claude_session_ids.pop(key, None)
+                self._claude_session_costs.pop(key, None)
+                session.claude_session_id = None
+                claude_sid = None  # Will fall through to if not claude_sid block below
+
+        if not claude_sid:
             # First call — write CLAUDE.md and inject history if available
             self.context.write_claude_md(self.claude.project_dir)
             runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
@@ -246,6 +274,7 @@ class AgentLoop:
         # Store Claude CLI session ID from response for future --resume
         if response.session_id and not response.is_error:
             self._claude_session_ids[key] = response.session_id
+            session.claude_session_id = response.session_id
 
         # Apply secret filtering
         result_text = filter_secrets(response.result) if response.result else ""
@@ -267,6 +296,9 @@ class AgentLoop:
             cache_creation_input_tokens=response.cache_creation_input_tokens,
         )
         await self._session_manager.save(session)
+
+        # Idle consolidation timer
+        self._reset_idle_timer(key, session)
 
         # If message_sender already sent in this turn, don't duplicate
         if self.message_sender._sent_in_turn:
@@ -298,6 +330,47 @@ class AgentLoop:
         self._claude_session_ids.pop(msg.session_key, None)
         self._claude_session_costs.pop(msg.session_key, None)
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started.")
+
+    def _reset_idle_timer(self, session_key: str, session: Session) -> None:
+        """Reset idle consolidation timer for a session."""
+        if self._idle_timeout <= 0:
+            return  # Disabled
+        if session_key.startswith("cron:"):
+            return  # Skip cron sessions
+
+        # Cancel existing timer
+        if session_key in self._idle_timers:
+            self._idle_timers[session_key].cancel()
+
+        loop = asyncio.get_running_loop()
+        self._idle_timers[session_key] = loop.call_later(
+            self._idle_timeout,
+            lambda sk=session_key: asyncio.ensure_future(self._idle_consolidate(sk)),
+        )
+
+    async def _idle_consolidate(self, session_key: str) -> None:
+        """Consolidate an idle session and clean up."""
+        self._idle_timers.pop(session_key, None)
+
+        session = await self._session_manager.get_or_create(session_key)
+
+        unconsolidated = len(session.messages) - session.last_consolidated
+        if unconsolidated < self._idle_min_turns:
+            return  # Too few messages, not worth consolidating
+
+        if session_key in self._consolidating:
+            return  # Already consolidating
+
+        logger.info("Idle consolidation for session {} ({} messages)", session_key, unconsolidated)
+        self._consolidating.add(session_key)
+        try:
+            await self._consolidate_memory(session, archive_all=True)
+            self._claude_session_ids.pop(session_key, None)
+            self._claude_session_costs.pop(session_key, None)
+        except Exception:
+            logger.exception("Idle consolidation failed for {}", session_key)
+        finally:
+            self._consolidating.discard(session_key)
 
     def _maybe_consolidate(self, session: Session) -> None:
         """Trigger background consolidation if needed."""
@@ -355,11 +428,15 @@ class AgentLoop:
         Args:
             ephemeral: If True, use a fresh session with no history or resume.
         """
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
-        if ephemeral:
-            # Force a fresh Claude CLI session with no history
-            self._claude_session_ids.pop(msg.session_key, None)
-            self._claude_session_costs.pop(msg.session_key, None)
-            await self._session_manager.clear(msg.session_key)
-        response = await self._process_message(msg)
-        return response.content if response else ""
+        msg = InboundMessage(
+            channel=channel, sender_id="user", chat_id=chat_id,
+            content=content, session_key_override=session_key,
+        )
+        async with self._session_locks[msg.session_key]:
+            if ephemeral:
+                # Force a fresh Claude CLI session with no history
+                self._claude_session_ids.pop(msg.session_key, None)
+                self._claude_session_costs.pop(msg.session_key, None)
+                await self._session_manager.clear(msg.session_key)
+            response = await self._process_message(msg)
+            return response.content if response else ""

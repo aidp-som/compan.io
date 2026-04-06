@@ -19,6 +19,8 @@ class Session:
     session_id: str
     messages: list[dict[str, Any]] = field(default_factory=list)
     last_consolidated: int = 0
+    claude_session_id: str | None = None
+    claude_session_updated_at: str | None = None
 
 
 class SessionManager:
@@ -79,6 +81,9 @@ class SessionManager:
         "ALTER TABLE messages ADD COLUMN output_tokens INTEGER",
         "ALTER TABLE messages ADD COLUMN cache_read_input_tokens INTEGER",
         "ALTER TABLE messages ADD COLUMN cache_creation_input_tokens INTEGER",
+        # Migration 5: Add claude_session_id to sessions table
+        "ALTER TABLE sessions ADD COLUMN claude_session_id TEXT",
+        "ALTER TABLE sessions ADD COLUMN claude_session_updated_at TIMESTAMP",
     ]
 
     def __init__(self, sessions_dir: Path):
@@ -114,7 +119,8 @@ class SessionManager:
         assert self._db is not None
 
         cursor = await self._db.execute(
-            "SELECT last_consolidated FROM sessions WHERE session_id = ?",
+            "SELECT last_consolidated, claude_session_id, claude_session_updated_at "
+            "FROM sessions WHERE session_id = ?",
             (session_id,),
         )
         row = await cursor.fetchone()
@@ -147,6 +153,8 @@ class SessionManager:
                 session_id=session_id,
                 messages=messages,
                 last_consolidated=last_consolidated,
+                claude_session_id=row[1],
+                claude_session_updated_at=row[2],
             )
 
         self._cache[session_id] = session
@@ -192,9 +200,11 @@ class SessionManager:
         await self._db.execute(
             "UPDATE sessions SET last_consolidated = ?, "
             "total_cost_usd = COALESCE(?, total_cost_usd), "
+            "claude_session_id = ?, "
+            "claude_session_updated_at = CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE claude_session_updated_at END, "
             "updated_at = CURRENT_TIMESTAMP "
             "WHERE session_id = ?",
-            (session.last_consolidated, total_cost, session.session_id),
+            (session.last_consolidated, total_cost, session.claude_session_id, session.claude_session_id, session.session_id),
         )
         await self._db.commit()
 
@@ -202,7 +212,8 @@ class SessionManager:
         assert self._db is not None
         await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         await self._db.execute(
-            "UPDATE sessions SET last_consolidated = 0, updated_at = CURRENT_TIMESTAMP "
+            "UPDATE sessions SET last_consolidated = 0, claude_session_id = NULL, "
+            "claude_session_updated_at = NULL, updated_at = CURRENT_TIMESTAMP "
             "WHERE session_id = ?",
             (session_id,),
         )
