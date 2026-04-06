@@ -49,8 +49,33 @@ _SECRET_EXACT = frozenset(
 _CLAUDE_PREFIXES = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE")
 
 # Env vars that must pass through despite matching secret/Claude patterns.
-# CLAUDE_CODE_OAUTH_TOKEN is required for headless Claude CLI auth (Max plan).
-_PASSTHROUGH_KEYS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+# Auth, cloud provider, config, network, and shell settings needed by child Claude CLI.
+# Blocked (not listed): CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_SSE_PORT,
+#   CLAUDE_CODE_REMOTE_SESSION_ID, CLAUDE_CODE_IS_COWORK — parent-process internals.
+_PASSTHROUGH_KEYS = frozenset({
+    # Authentication
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+    # Cloud providers
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    # Configuration
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_DISABLE_AUTOCOMPACT",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_SHELL",
+    "CLAUDE_CODE_DEBUG_LOG_LEVEL",
+    "CLAUDE_CONFIG_DIR",
+    # Network / mTLS
+    "CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY",
+})
 
 
 def _filtered_env() -> dict[str, str]:

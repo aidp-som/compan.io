@@ -711,12 +711,18 @@ class TelegramChannel(BaseChannel):
         """Repeatedly send 'typing' action until cancelled."""
         try:
             while self._app:
-                await self._app.bot.send_chat_action(chat_id=int(chat_id), action="typing")
+                try:
+                    await self._app.bot.send_chat_action(chat_id=int(chat_id), action="typing")
+                except telegram.error.RetryAfter as e:
+                    logger.debug("Typing flood control for {}, waiting {}s", chat_id, e.retry_after)
+                    await asyncio.sleep(e.retry_after)
+                    continue
+                except Exception as e:
+                    logger.debug("Typing indicator error for {}: {}", chat_id, e)
+                    break
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            logger.debug("Typing indicator stopped for {}: {}", chat_id, e)
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log polling / handler errors instead of silently swallowing them."""

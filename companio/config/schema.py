@@ -45,7 +45,7 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.companio/workspace"
-    memory_window: int = 200
+    memory_window: int = 50
     bot_name: str = "companio"  # Customizable bot identity name
 
 
