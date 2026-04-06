@@ -55,6 +55,7 @@ _SECRET_PATTERNS = re.compile(
             r"xoxb-[0-9]+-[0-9]+-[a-zA-Z0-9]+",
             r"xoxp-[0-9]+-[0-9]+-[a-zA-Z0-9]+",
             r"xoxs-[0-9]+-[0-9]+-[a-zA-Z0-9]+",
+            r"xapp-[0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+",
             # AWS access key IDs
             r"AKIA[0-9A-Z]{16}",
             # Webhook secrets

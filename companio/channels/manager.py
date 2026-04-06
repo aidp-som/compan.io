@@ -47,6 +47,20 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Telegram channel not available: {}", e)
 
+        # Slack channel
+        if self.config.channels.slack.enabled:
+            try:
+                from companio.channels.slack import SlackChannel
+
+                self.channels["slack"] = SlackChannel(
+                    self.config.channels.slack,
+                    self.bus,
+                    workspace=self.config.workspace_path,
+                )
+                logger.info("Slack channel enabled")
+            except ImportError as e:
+                logger.warning("Slack channel not available: {}", e)
+
         self._validate_allow_from()
 
     def _validate_allow_from(self) -> None:

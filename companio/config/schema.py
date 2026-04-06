@@ -34,11 +34,22 @@ class RoleConfig(Base):
     role_prompt: str | None = None  # Injected into system prompt for behavioral rules
 
 
+class SlackConfig(Base):
+    """Slack channel configuration (Socket Mode)."""
+
+    enabled: bool = False
+    bot_token: str = ""  # xoxb-... Bot User OAuth Token
+    app_token: str = ""  # xapp-... App-Level Token for Socket Mode
+    allow_from: list[str] = Field(default_factory=list)  # Slack user IDs (e.g. ["U12345678"])
+    respond_in_thread: bool = True  # Reply in thread when mentioned in channels
+
+
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
     send_progress: bool = True  # stream agent's text progress to the channel
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    slack: SlackConfig = Field(default_factory=SlackConfig)
 
 
 class AgentDefaults(Base):

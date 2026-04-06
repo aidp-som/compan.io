@@ -104,7 +104,7 @@ class BaseChannel(ABC):
                     OutboundMessage(
                         channel=self.name,
                         chat_id=str(chat_id),
-                        text="접근 권한이 없습니다. 관리자에게 문의하세요.",
+                        content="접근 권한이 없습니다. 관리자에게 문의하세요.",
                     )
                 )
             except Exception:

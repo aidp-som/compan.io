@@ -89,7 +89,7 @@ class AgentLoop:
                 except asyncio.TimeoutError:
                     continue
 
-                if msg.content.strip().lower() == "/stop":
+                if msg.content.strip().lower() in ("/stop", "!stop"):
                     await self._handle_stop(msg)
                 else:
                     task = asyncio.create_task(self._dispatch(msg))
@@ -149,14 +149,14 @@ class AgentLoop:
         key = msg.session_key
         session = await self._session_manager.get_or_create(key)
 
-        # Slash commands
+        # Slash commands (support both /cmd and !cmd for Slack compatibility)
         cmd = msg.content.strip().lower()
-        if cmd == "/new":
+        if cmd in ("/new", "!new"):
             return await self._handle_new(msg, session)
-        if cmd == "/help":
+        if cmd in ("/help", "!help"):
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
-                content="companio commands:\n/new \u2014 Start a new conversation\n/stop \u2014 Stop the current task\n/help \u2014 Show available commands",
+                content="companio commands:\n/new or !new \u2014 Start a new conversation\n/stop or !stop \u2014 Stop the current task\n/help or !help \u2014 Show available commands",
             )
 
         # Background consolidation if needed
