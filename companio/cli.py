@@ -415,6 +415,9 @@ def gateway(
             ephemeral=True,
         )
 
+        # NOTE: MessageSender cannot be injected into Claude CLI subprocess.
+        # _sent_in_turn is always False. The fallback below is the only delivery path.
+        # If message tool injection is implemented later, review for double-send risk.
         if agent.message_sender._sent_in_turn:
             return response
 

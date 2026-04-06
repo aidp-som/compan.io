@@ -87,7 +87,7 @@ Your workspace is at: {workspace_path}
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
 
-Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+Reply directly with text for all responses. For scheduled tasks (cron), your response text is automatically delivered to the target channel — no additional tool call needed."""
 
     @staticmethod
     def _build_runtime_context(
