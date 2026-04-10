@@ -8,8 +8,10 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -185,7 +187,8 @@ class ClaudeCLI:
             allowed_tools: Whitelist of tools (role-based access control).
             disallowed_tools: Blacklist of tools (role-based access control).
         """
-        cmd = ["claude", "-p", "--output-format", "json"]
+        claude_bin = shutil.which("claude") or "claude"
+        cmd = [claude_bin, "-p", "--output-format", "json"]
         cmd.extend(["--max-turns", str(self.max_turns)])
         if self.workspace_dir:
             cmd.extend(["--add-dir", str(self.workspace_dir)])
@@ -215,17 +218,21 @@ class ClaudeCLI:
         """Spawn the claude CLI process and return (returncode, stdout, stderr).
 
         Messages are passed via stdin for ARG_MAX safety and security.
-        Uses start_new_session=True for process group management.
+        On Unix, uses start_new_session=True for process group management.
+        On Windows, uses CREATE_NEW_PROCESS_GROUP for similar behavior.
         """
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        kwargs: dict[str, Any] = dict(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=_filtered_env(),
             cwd=str(self.project_dir),
-            start_new_session=True,
         )
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(message.encode("utf-8")),
@@ -247,23 +254,35 @@ class ClaudeCLI:
 
     @staticmethod
     async def _kill_proc(proc: asyncio.subprocess.Process) -> None:
-        """Kill the process group: SIGTERM, wait 5s, then SIGKILL."""
+        """Kill the process (group). Uses platform-appropriate APIs."""
         if proc.pid is None:
             return
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            return
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            logger.warning("Process {} did not exit after SIGTERM, escalating to SIGKILL", proc.pid)
+        if sys.platform == "win32":
+            # Windows: terminate the process tree via taskkill
             try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                subprocess.call(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             except (ProcessLookupError, OSError):
                 pass
+        else:
+            # Unix: SIGTERM process group, then SIGKILL after timeout
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                return
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning("Process {} did not exit after SIGTERM, escalating to SIGKILL", proc.pid)
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
 
     async def run(
         self,
