@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 
 from companio.config.schema import Config, RoleConfig
 
+# Progress pulse constants — see 04-plan.md §1.14a
+PULSE_INTERVAL_SECONDS = 5
+PULSE_MAX_COUNT = 4
+PULSE_TEXT_FORMAT = "\uc0dd\uac01 \uc911... (\uc57d {n}\ucd08)"
+
 
 class AgentLoop:
     """Delegates processing to Claude CLI subprocess."""
@@ -61,6 +66,10 @@ class AgentLoop:
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}
         self._idle_timeout = config.agents.defaults.idle_consolidation_timeout if config else 1800
         self._idle_min_turns = config.agents.defaults.idle_consolidation_min_turns if config else 4
+        # Slack progress pulse flag (04-plan.md §1.14a) — default off, opt-in per instance
+        self._slack_progress_pulse_enabled = bool(
+            config and config.channels.slack.progress_pulse_enabled
+        )
 
     def _resolve_role(self, sender_id: str) -> tuple[str | None, RoleConfig | None]:
         """Resolve the sender's role name and config. Returns (None, None) if no role system configured."""
@@ -126,6 +135,34 @@ class AgentLoop:
                 pass
         content = f"Stopped {cancelled} task(s)." if cancelled else "No active task to stop."
         await self.bus.publish_outbound(OutboundMessage.reply_to_inbound(msg, content))
+
+    def _should_start_pulse(self, msg: InboundMessage) -> bool:
+        """Pulse only fires for Slack channels when the config flag is enabled."""
+        if msg.channel != "slack":
+            return False
+        return self._slack_progress_pulse_enabled
+
+    async def _progress_pulse_loop(self, msg: InboundMessage) -> None:
+        """Send up to PULSE_MAX_COUNT progress updates at PULSE_INTERVAL_SECONDS intervals.
+
+        Each pulse re-publishes a `_progress=True` OutboundMessage with increasing
+        elapsed-time text. SlackChannel's `_progress_messages` cache routes these to
+        `chat.update`, so no new sending code is needed.
+        """
+        try:
+            for i in range(1, PULSE_MAX_COUNT + 1):
+                await asyncio.sleep(PULSE_INTERVAL_SECONDS)
+                elapsed = i * PULSE_INTERVAL_SECONDS
+                await self.bus.publish_outbound(
+                    OutboundMessage.reply_to_inbound(
+                        msg,
+                        PULSE_TEXT_FORMAT.format(n=elapsed),
+                        extra_metadata={"_progress": True},
+                    )
+                )
+        except asyncio.CancelledError:
+            # Cancelled when the response arrives, an error fires, or /stop is invoked.
+            pass
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process under per-session lock.
@@ -195,6 +232,28 @@ class AgentLoop:
             )
         )
 
+        # Start progress pulse loop (Slack only, opt-in via config flag).
+        # Lifecycle is managed here — _dispatch is intentionally not touched so
+        # this stays orthogonal to WO-P1-01's ACK reaction work.
+        pulse_task: asyncio.Task | None = None
+        if self._should_start_pulse(msg):
+            pulse_task = asyncio.create_task(self._progress_pulse_loop(msg))
+
+        try:
+            return await self._process_message_inner(msg, session, key)
+        finally:
+            if pulse_task is not None:
+                pulse_task.cancel()
+                try:
+                    await pulse_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _process_message_inner(
+        self, msg: InboundMessage, session: Session, key: str
+    ) -> OutboundMessage | None:
+        """Inner processing body. Split out so the pulse task in `_process_message`
+        can wrap it in try/finally without inflating the diff."""
         # Resolve role-based tool restrictions
         role_name, role = self._resolve_role(msg.sender_id)
         role_tools: dict = {}

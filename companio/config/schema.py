@@ -43,6 +43,7 @@ class SlackConfig(Base):
     allow_from: list[str] = Field(default_factory=list)  # Slack user IDs (e.g. ["U12345678"])
     respond_in_thread: bool = True  # Reply in thread when mentioned in channels
     ack_reactions_enabled: bool = False  # Send 👀 reaction on mention; remove on done
+    progress_pulse_enabled: bool = False  # Edit progress message every 5s up to 4 times
 
 
 class ChannelsConfig(Base):
