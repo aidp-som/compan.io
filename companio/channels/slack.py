@@ -17,6 +17,25 @@ from companio.helpers import split_message
 SLACK_MAX_MESSAGE_LEN = 3000  # Slack 메시지 안전 길이
 MAX_RECONNECT_FAILURES = 5
 
+WINDOWS_SLACK_INSTALL_GUIDE = """\
+안녕하세요! SOM ERP Slack에 오신 것을 환영합니다 :wave:
+
+*Windows용 Slack 설치 방법*
+
+1. 아래 링크에서 Slack 설치 파일을 다운로드하세요.
+   https://slack.com/downloads/windows
+
+2. 다운로드된 `SlackSetup.exe` 파일을 실행합니다.
+
+3. 설치가 완료되면 Slack을 실행하고 *Sign in to Slack* 을 클릭합니다.
+
+4. 워크스페이스 URL 또는 초대받은 이메일 주소로 로그인합니다.
+
+5. 로그인하면 자동으로 워크스페이스에 연결됩니다.
+
+문의사항이 있으시면 언제든지 말씀해주세요!
+"""
+
 
 def _markdown_to_mrkdwn(text: str) -> str:
     """Convert standard Markdown to Slack mrkdwn format.
@@ -127,6 +146,10 @@ class SlackChannel(BaseChannel):
         @self._app.event("message")
         async def handle_message(event, say):  # noqa: ARG001
             await self._on_message(event)
+
+        @self._app.event("member_joined_channel")
+        async def handle_member_joined(event, say):  # noqa: ARG001
+            await self._on_member_joined(event)
 
         # Connect via Socket Mode
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
@@ -393,3 +416,26 @@ class SlackChannel(BaseChannel):
                 session_key=session_key,
                 media=media,
             )
+
+    async def _on_member_joined(self, event: dict) -> None:
+        """Handle member_joined_channel — send Windows Slack install guide via DM."""
+        user_id = event.get("user")
+        if not user_id or not self._app:
+            return
+
+        # 봇 자신이 채널에 입장한 경우 무시
+        if user_id == self._bot_user_id:
+            return
+
+        try:
+            # DM 채널 열기
+            dm_result = await self._app.client.conversations_open(users=user_id)
+            dm_channel = dm_result["channel"]["id"]
+
+            await self._app.client.chat_postMessage(
+                channel=dm_channel,
+                text=WINDOWS_SLACK_INSTALL_GUIDE,
+            )
+            self._log.info("Sent Windows Slack install guide to new member {}", user_id)
+        except Exception as e:
+            self._log.error("Failed to send welcome message to {}: {}", user_id, e)
