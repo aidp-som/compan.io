@@ -63,6 +63,15 @@ class MessageSender:
     ) -> str:
         """Send a message to the current chat context.
 
+        NOTE (2026-04-11): The `share_to_channel` parameter is currently DEAD
+        CODE. Claude runs as a `claude -p` subprocess with no MCP bridge to
+        this Python class, so this method is never invoked from the LLM.
+        Channel broadcast is now triggered via regex on the raw user input in
+        `AgentLoop._process_message` → `_apply_broadcast_intent`. This
+        signature, the 3-layer guard, and the `_broadcast_called` tracking are
+        kept as a dead-code contract in case a future MCP bridge resurrects
+        the path.
+
         Args:
             content: 메시지 내용.
             share_to_channel: True면 채널 본문에도 함께 공지 (스레드 컨텍스트에서만 유효).
@@ -74,6 +83,13 @@ class MessageSender:
             message_id: 명시적 message_id override (보통 사용 X).
             media: 첨부 파일 경로 목록.
         """
+        if share_to_channel:
+            logger.warning(
+                "MessageSender.send(share_to_channel=True) called — this path "
+                "is dead code as of 2026-04-11. Broadcast is now handled by "
+                "regex trigger in AgentLoop. If you see this log, investigate "
+                "the caller."
+            )
         inbound = self._default_inbound
         target_channel = channel or (inbound.channel if inbound else "")
         target_chat_id = chat_id or (inbound.chat_id if inbound else "")

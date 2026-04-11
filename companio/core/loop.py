@@ -24,23 +24,77 @@ from companio.tools.message import MessageSender
 if TYPE_CHECKING:
     from companio.cron import CronService
 
-# Shadow detector — matches phrases that *suggest* the user wants the answer
-# broadcast to the channel body. Hits do NOT trigger any action; they only
-# arm a post-turn check that the LLM honored the intent via share_to_channel.
-# Mismatches are logged at WARN as `slack.broadcast.shadow_miss` for metric
-# review (04-plan §1.6, §1.13).
-_BROADCAST_TRIGGER_PATTERN = re.compile(
-    r"(채널에도|채널에 공유|채널에 공지|채널에 알|다른 사람도|broadcast|"
-    r"공지해|방송해|모두에게|팀에 알|everyone)",
+# Broadcast intent detection (04-plan §1.2): deterministic regex trigger. The
+# LLM runs as a `claude -p` subprocess with no Python bridge, so the legacy
+# `MessageSender.send(share_to_channel=...)` path is dead code. Instead, we
+# detect the user's imperative request on the raw inbound text and apply
+# `reply_broadcast=True` in `_apply_broadcast_intent` below.
+_BROADCAST_CHANNEL_TOKENS = ("채널", "channel")
+_BROADCAST_VERB_TOKENS_KO = (
+    "공지", "공유", "알려", "알림", "올려", "올리", "브리핑",
+    "방송", "보내", "전달", "안내",
+)
+_BROADCAST_STANDALONE_TOKENS = (
+    "다른 사람도", "팀에 알", "팀에 공유", "팀에 공지",
+    "모두에게", "모두한테", "@channel", "@here", "방송해주",
+)
+
+# 명령형 어미: "지금 ~해줘" 패턴. Korean requests that ask for immediate action.
+_IMPERATIVE_ENDING = re.compile(
+    r"(해|해줘|해주세요|드려|드릴게|알려|알려줘|올려|올려줘|"
+    r"공유해|공지해|브리핑해|전달해|보내|보내줘|보내주세요)"
+    r"\s*[?!.~ㅋㅎ]*\s*$"
+)
+
+# English: channel + verb bigram (avoids single-word false positives).
+_ENGLISH_CHANNEL_VERB = re.compile(
+    r"(\b(post|share|announce|broadcast)\b.*\bchannel\b|"
+    r"\bto\s+(the\s+)?channel\b|"
+    r"\bbroadcast\s+to\b)",
     re.IGNORECASE,
+)
+
+# 과거형/참조형: user is talking about something that already happened. Must
+# exclude these so "어제 채널에 공지 떴는데 요약해줘" does not trigger.
+_REFERENTIAL_HINT = re.compile(
+    r"(떴|떴는데|떴어|됐|됐어|있어|있었|봤|봤어|받았|"
+    r"올라왔|있던|있는|었|왔|뜬\s*글|뜬\s*공지)"
 )
 
 
 def _detect_broadcast_intent(content: str) -> bool:
-    """Return True if `content` contains a broadcast trigger phrase."""
+    """Heuristic: detect imperative request to broadcast bot reply.
+
+    Strict gates to minimize false positives:
+    - Standalone phrases trigger directly.
+    - Korean: needs (channel token) AND (verb token) AND (imperative ending)
+              AND NOT (referential hint).
+    - English: needs strong bigram pattern.
+    """
     if not content:
         return False
-    return bool(_BROADCAST_TRIGGER_PATTERN.search(content))
+    text = content.strip().lower()
+
+    if any(tok in text for tok in (t.lower() for t in _BROADCAST_STANDALONE_TOKENS)):
+        return True
+
+    has_channel = any(tok in text for tok in (t.lower() for t in _BROADCAST_CHANNEL_TOKENS))
+    has_verb = any(tok in text for tok in _BROADCAST_VERB_TOKENS_KO)
+    is_imperative = bool(_IMPERATIVE_ENDING.search(text))
+    is_referential = bool(_REFERENTIAL_HINT.search(text))
+
+    if has_channel and has_verb and is_imperative and not is_referential:
+        return True
+
+    if _ENGLISH_CHANNEL_VERB.search(text):
+        return True
+
+    return False
+
+
+# Marker appended to the bot reply whenever a broadcast auto-fires. Exact
+# string is locked by `test_broadcast_marker_exact_string_lock`.
+_BROADCAST_MARKER = "\n\n_📢 채널에도 공유되었습니다_"
 
 # Progress pulse constants — see 04-plan.md §1.14a
 PULSE_INTERVAL_SECONDS = 5
@@ -71,12 +125,19 @@ class AgentLoop:
         self._session_manager = session_manager or SessionManager(workspace)
         self._config = config
         slack_cfg = config.channels.slack if config else None
+        # Broadcast flags are mirrored on both AgentLoop (regex trigger, live
+        # path) and MessageSender (dead-code contract) so the two behaviors
+        # stay in sync if a future MCP bridge resurrects the tool path.
+        self._slack_broadcast_enabled: bool = (
+            bool(slack_cfg.broadcast_enabled) if slack_cfg else False
+        )
+        self._slack_broadcast_blocked_channels: list[str] = (
+            list(slack_cfg.broadcast_blocked_channels) if slack_cfg else []
+        )
         self.message_sender = MessageSender(
             send_callback=bus.publish_outbound,
-            broadcast_enabled=bool(slack_cfg.broadcast_enabled) if slack_cfg else False,
-            broadcast_blocked_channels=(
-                list(slack_cfg.broadcast_blocked_channels) if slack_cfg else []
-            ),
+            broadcast_enabled=self._slack_broadcast_enabled,
+            broadcast_blocked_channels=list(self._slack_broadcast_blocked_channels),
         )
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
@@ -229,16 +290,16 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        # Shadow detector arming — record whether the inbound text *looks like*
-        # a broadcast request. We don't act on it. After processing we check
-        # whether the LLM actually called share_to_channel=True; mismatches are
-        # logged at WARN for metric review (04-plan §1.6).
-        broadcast_intent_detected = _detect_broadcast_intent(msg.content)
+        # Regex-based broadcast intent detection (04-plan §1.2). Matched on the
+        # raw user text — primary trigger for the channel-broadcast feature.
+        broadcast_intent = _detect_broadcast_intent(msg.content)
 
         key = msg.session_key
         session = await self._session_manager.get_or_create(key)
 
-        # Slash commands (support both /cmd and !cmd for Slack compatibility)
+        # Slash commands (support both /cmd and !cmd for Slack compatibility).
+        # Early return intentionally skips broadcast intent application — a
+        # /help response has no reason to be broadcast to the channel body.
         cmd = msg.content.strip().lower()
         if cmd in ("/new", "!new"):
             return await self._handle_new(msg, session)
@@ -255,38 +316,84 @@ class AgentLoop:
         # channel/chat/thread identity. MessageSender pulls what it needs internally.
         self.message_sender.set_context(msg)
         self.message_sender.start_turn()
-        try:
-            return await self._invoke_claude_turn(
-                msg, session, key, broadcast_intent_detected
+
+        response = await self._invoke_claude_turn(msg, session, key)
+
+        # Apply broadcast intent only on the final outbound. If the turn
+        # produced no outbound (pulse path, already sent via tool), skip.
+        if response is not None and broadcast_intent:
+            response = self._apply_broadcast_intent(msg, response)
+
+        return response
+
+    def _apply_broadcast_intent(
+        self, msg: InboundMessage, response: OutboundMessage
+    ) -> OutboundMessage:
+        """Inject `reply_broadcast=True` via reply_to_inbound (04-plan §1.3).
+
+        4 guards (priority order):
+          1. is_channel
+          2. thread_ts present
+          3. broadcast_enabled config flag
+          4. chat_id NOT in broadcast_blocked_channels
+
+        On guard fail: log INFO with reason, return response unchanged.
+        On success: log INFO `auto_triggered`, return a NEW outbound built via
+        `OutboundMessage.reply_to_inbound(...)` — never call the bare
+        constructor here; the regression guard
+        `test_loop_py_uses_only_reply_to_inbound` depends on it.
+        """
+        inbound_meta = msg.metadata or {}
+
+        skip_reason: str | None = None
+        if not inbound_meta.get("is_channel"):
+            skip_reason = "not_channel"
+        elif not inbound_meta.get("thread_ts"):
+            skip_reason = "no_thread"
+        elif not self._slack_broadcast_enabled:
+            skip_reason = "disabled"
+        elif msg.chat_id in self._slack_broadcast_blocked_channels:
+            skip_reason = "blocked"
+
+        if skip_reason:
+            logger.info(
+                "slack.broadcast.intent_skipped chat_id={} reason={} content={!r}",
+                msg.chat_id, skip_reason, msg.content[:200],
             )
-        finally:
-            # Shadow detector audit (04-plan §1.6, §1.13). WARN-only — never
-            # blocks the response. Records metric for 2-week LLM-trigger review.
-            if (
-                broadcast_intent_detected
-                and not self.message_sender._broadcast_called
-            ):
-                logger.warning(
-                    "slack.broadcast.shadow_miss chat_id={} content={!r}",
-                    msg.chat_id,
-                    msg.content[:200],
-                )
+            return response
+
+        # Guard against duplicate marker (defensive).
+        if _BROADCAST_MARKER in (response.content or ""):
+            logger.warning(
+                "slack.broadcast.marker_already_present chat_id={}", msg.chat_id,
+            )
+            return response
+
+        new_content = (response.content or "") + _BROADCAST_MARKER
+        new_outbound = OutboundMessage.reply_to_inbound(
+            msg,
+            new_content,
+            extra_metadata={"reply_broadcast": True},
+            media=response.media,
+        )
+
+        logger.info(
+            "slack.broadcast.auto_triggered chat_id={} thread_ts={} content={!r}",
+            msg.chat_id, inbound_meta.get("thread_ts"), msg.content[:200],
+        )
+        return new_outbound
 
     async def _invoke_claude_turn(
         self,
         msg: InboundMessage,
         session: Session,
         key: str,
-        broadcast_intent_detected: bool,
     ) -> OutboundMessage | None:
         """Run the Claude CLI for one turn and return the final outbound (if any).
 
-        Extracted from `_process_message` so the shadow-detector finally clause
-        in the caller can wrap every exit path uniformly. `broadcast_intent_detected`
-        is only carried for symmetry — the audit happens in `_process_message`.
+        Split from `_process_message` so the pulse task lifecycle can wrap
+        every exit path uniformly.
         """
-        del broadcast_intent_detected  # audited by caller's finally clause
-
         # Send ACK to user (so they know we're processing)
         await self.bus.publish_outbound(
             OutboundMessage.reply_to_inbound(

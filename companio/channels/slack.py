@@ -291,12 +291,22 @@ class SlackChannel(BaseChannel):
                 and msg.chat_id not in self.config.broadcast_blocked_channels
             )
 
-            # Post new message(s)
+            # Post new message(s). Broadcast fires only for single-chunk
+            # responses so the marker ("📢 채널에도 공유되었습니다") and
+            # reply_broadcast=True stay on the same Slack message. Multi-chunk
+            # broadcast support is tracked for a follow-up PR.
             try:
                 chunks = list(split_message(mrkdwn_text, SLACK_MAX_MESSAGE_LEN))
+                can_broadcast = reply_broadcast_flag and len(chunks) == 1
+                if reply_broadcast_flag and len(chunks) > 1:
+                    self._log.info(
+                        "slack.broadcast.skipped_multi_chunk chat_id={} chunks={}",
+                        msg.chat_id,
+                        len(chunks),
+                    )
                 for i, chunk in enumerate(chunks):
                     is_last = i == len(chunks) - 1
-                    chunk_broadcast = reply_broadcast_flag and is_last
+                    chunk_broadcast = can_broadcast and is_last
                     result = await self._app.client.chat_postMessage(
                         channel=msg.chat_id,
                         text=chunk,

@@ -1,7 +1,19 @@
-"""Broadcast (`share_to_channel`) tests for MessageSender.
+"""DEAD CODE CONTRACT (2026-04-11)
 
-Covers the 3-layer safety contract from .feature/2026-04-11-slack-ack-reaction-channel-broadcast
-04-plan §1.6, §1.8, §1.13:
+The `MessageSender.send(share_to_channel=...)` parameter is currently dead
+code — Claude runs as a `claude -p` subprocess and has no MCP bridge to
+this Python class, so the LLM cannot invoke this path. Broadcast is now
+triggered by regex matching on user input in
+`AgentLoop._process_message` → `_apply_broadcast_intent`.
+
+These tests are kept as a contract to lock the behavior in case a future
+MCP bridge resurrects this code path. They should still all pass — they
+verify the metadata-injection logic works correctly when the path is
+called directly (e.g., from tests or future bridges).
+
+Covers the 3-layer safety contract from
+.feature/2026-04-11-slack-ack-reaction-channel-broadcast 04-plan §1.6,
+§1.8, §1.13:
 
 - `share_to_channel=True` only injects `reply_broadcast=True` into outbound metadata
   when ALL of (is_channel, thread_ts present, broadcast_enabled, not blocked) hold.
@@ -49,7 +61,7 @@ def _dm_inbound() -> InboundMessage:
     )
 
 
-class TestShareToChannelHappyPath:
+class TestShareToChannelDeadCodeContract_HappyPath:
     async def test_share_to_channel_sets_reply_broadcast_metadata(self, captured):
         sent, callback = captured
         sender = MessageSender(
@@ -83,7 +95,7 @@ class TestShareToChannelHappyPath:
         assert sender._broadcast_called is False
 
 
-class TestShareToChannelGuards:
+class TestShareToChannelDeadCodeContract_Guards:
     async def test_share_to_channel_ignored_in_dm(self, captured):
         sent, callback = captured
         sender = MessageSender(send_callback=callback, broadcast_enabled=True)
@@ -140,7 +152,7 @@ class TestShareToChannelGuards:
         assert "reply_broadcast" not in sent[0].metadata
 
 
-class TestSkipHintInReturnValue:
+class TestShareToChannelDeadCodeContract_SkipHint:
     async def test_skip_hint_in_return_value_when_ignored(self, captured):
         _, callback = captured
         sender = MessageSender(send_callback=callback, broadcast_enabled=False)
