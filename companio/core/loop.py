@@ -125,9 +125,7 @@ class AgentLoop:
             except (asyncio.CancelledError, Exception):
                 pass
         content = f"Stopped {cancelled} task(s)." if cancelled else "No active task to stop."
-        await self.bus.publish_outbound(
-            OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
-        )
+        await self.bus.publish_outbound(OutboundMessage.reply_to_inbound(msg, content))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process under per-session lock."""
@@ -142,10 +140,7 @@ class AgentLoop:
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
                 await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel, chat_id=msg.chat_id,
-                        content="Sorry, I encountered an error.",
-                    )
+                    OutboundMessage.reply_to_inbound(msg, "Sorry, I encountered an error.")
                 )
 
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
@@ -161,24 +156,23 @@ class AgentLoop:
         if cmd in ("/new", "!new"):
             return await self._handle_new(msg, session)
         if cmd in ("/help", "!help"):
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id,
-                content="companio commands:\n/new or !new \u2014 Start a new conversation\n/stop or !stop \u2014 Stop the current task\n/help or !help \u2014 Show available commands",
+            return OutboundMessage.reply_to_inbound(
+                msg,
+                "companio commands:\n/new or !new \u2014 Start a new conversation\n/stop or !stop \u2014 Stop the current task\n/help or !help \u2014 Show available commands",
             )
 
         # Background consolidation if needed
         self._maybe_consolidate(session)
 
-        # Set message sender context
-        self.message_sender.set_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        # Set message sender context — inbound is the single source of truth for
+        # channel/chat/thread identity. MessageSender pulls what it needs internally.
+        self.message_sender.set_context(msg)
         self.message_sender.start_turn()
 
         # Send ACK to user (so they know we're processing)
         await self.bus.publish_outbound(
-            OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id,
-                content="\uc0dd\uac01 \uc911...",
-                metadata={"_progress": True},
+            OutboundMessage.reply_to_inbound(
+                msg, "\uc0dd\uac01 \uc911...", extra_metadata={"_progress": True}
             )
         )
 
@@ -190,11 +184,14 @@ class AgentLoop:
                 role_tools["allowed_tools"] = role.allowed_tools
             if role.disallowed_tools is not None:
                 role_tools["disallowed_tools"] = role.disallowed_tools
-        # Inject role info into metadata for runtime context
-        if role_name and msg.metadata is not None:
-            msg.metadata["role_name"] = role_name
+        # Build a local context dict for runtime prompt injection. Never mutate
+        # msg.metadata — it is forwarded across the bus, and role_prompt (a system
+        # prompt fragment) must not leak into outbound messages or logs.
+        context_metadata: dict = dict(msg.metadata or {})
+        if role_name:
+            context_metadata["role_name"] = role_name
             if role and role.role_prompt:
-                msg.metadata["role_prompt"] = role.role_prompt
+                context_metadata["role_prompt"] = role.role_prompt
 
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)
@@ -214,7 +211,7 @@ class AgentLoop:
 
         if claude_sid:
             # Resume existing session — no system prompt or history needed
-            runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
+            runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, context_metadata)
             full_message = f"{runtime_ctx}\n\n{msg.content}"
             response = await self.claude.run(
                 message=full_message, resume_session_id=claude_sid,
@@ -231,7 +228,7 @@ class AgentLoop:
         if not claude_sid:
             # First call — write CLAUDE.md and inject history if available
             self.context.write_claude_md(self.claude.project_dir)
-            runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, msg.metadata)
+            runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, context_metadata)
             history_text = ContextBuilder.format_history(session.messages[-self.memory_window:])
 
             full_message = f"{runtime_ctx}\n\n"
@@ -304,11 +301,7 @@ class AgentLoop:
         if self.message_sender._sent_in_turn:
             return None
 
-        return OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id,
-            content=result_text,
-            metadata=msg.metadata or {},
-        )
+        return OutboundMessage.reply_to_inbound(msg, result_text)
 
     async def _handle_new(self, msg: InboundMessage, session: Session) -> OutboundMessage:
         """Handle /new command - archive and clear session."""
@@ -318,9 +311,8 @@ class AgentLoop:
                 await self._consolidate_memory(session, archive_all=True)
         except Exception:
             logger.exception("/new archival failed for {}", session.session_id)
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id,
-                content="Memory archival failed, session not cleared.",
+            return OutboundMessage.reply_to_inbound(
+                msg, "Memory archival failed, session not cleared."
             )
         finally:
             self._consolidating.discard(session.session_id)
@@ -329,7 +321,7 @@ class AgentLoop:
         # Clear Claude CLI session so next call creates a fresh one
         self._claude_session_ids.pop(msg.session_key, None)
         self._claude_session_costs.pop(msg.session_key, None)
-        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="New session started.")
+        return OutboundMessage.reply_to_inbound(msg, "New session started.")
 
     def _reset_idle_timer(self, session_key: str, session: Session) -> None:
         """Reset idle consolidation timer for a session."""

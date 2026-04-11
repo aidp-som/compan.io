@@ -5,6 +5,19 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+# Keys that are safe to forward from InboundMessage.metadata to OutboundMessage.metadata.
+# Add new keys here when a new channel needs a new thread/reply hint. Never include
+# sensitive runtime context (role_prompt, role_name, credentials, etc.) — those must
+# stay in separate dicts and never cross the bus boundary.
+_FORWARDED_METADATA_KEYS = frozenset({
+    "thread_ts",          # Slack: parent message ts for threaded reply
+    "message_thread_id",  # Telegram: forum topic id
+    "message_ts",         # Slack: original message ts (for reactions/updates)
+    "message_id",         # Telegram: original message id (for reply-to)
+    "is_channel",         # Slack: channel vs DM flag
+    "is_group",           # Telegram: group chat flag
+})
+
 
 @dataclass
 class InboundMessage:
@@ -35,6 +48,35 @@ class OutboundMessage:
     reply_to: str | None = None
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def reply_to_inbound(
+        cls,
+        inbound: "InboundMessage",
+        content: str,
+        *,
+        extra_metadata: dict[str, Any] | None = None,
+        media: list[str] | None = None,
+    ) -> "OutboundMessage":
+        """Build an outbound reply that inherits thread/reply context from `inbound`.
+
+        Only keys in `_FORWARDED_METADATA_KEYS` are copied; anything else (role_prompt,
+        credentials, sender identity) stays inside the inbound and never leaks to
+        outbound logs or downstream channels. `extra_metadata` overrides inherited keys.
+        """
+        md: dict[str, Any] = {
+            k: v for k, v in (inbound.metadata or {}).items()
+            if k in _FORWARDED_METADATA_KEYS
+        }
+        if extra_metadata:
+            md.update(extra_metadata)
+        return cls(
+            channel=inbound.channel,
+            chat_id=inbound.chat_id,
+            content=content,
+            media=media or [],
+            metadata=md,
+        )
 
 
 class MessageBus:

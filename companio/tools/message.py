@@ -2,30 +2,35 @@
 
 from typing import Any, Awaitable, Callable
 
-from companio.bus import OutboundMessage
+from companio.bus import InboundMessage, OutboundMessage
 
 
 class MessageSender:
-    """Sends messages to users on chat channels."""
+    """Sends messages to users on chat channels.
+
+    The LLM-facing `send()` tool accepts only the legacy parameters (channel,
+    chat_id, message_id, media) — do not add `metadata` to its signature, because
+    it is exposed to the model and an untrusted model could poison internal state.
+
+    Thread/reply context is stored internally via `set_context(inbound)` and
+    propagated through `OutboundMessage.reply_to_inbound()`.
+    """
 
     def __init__(
         self,
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
-        default_channel: str = "",
-        default_chat_id: str = "",
-        default_message_id: str | None = None,
     ):
         self._send_callback = send_callback
-        self._default_channel = default_channel
-        self._default_chat_id = default_chat_id
-        self._default_message_id = default_message_id
+        self._default_inbound: InboundMessage | None = None
         self._sent_in_turn: bool = False
 
-    def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        """Set the current message context."""
-        self._default_channel = channel
-        self._default_chat_id = chat_id
-        self._default_message_id = message_id
+    def set_context(self, inbound: InboundMessage) -> None:
+        """Bind the sender to the inbound message currently being processed.
+
+        All subsequent `send()` calls in this turn default to replying to this
+        inbound — preserving its channel, chat_id, and thread metadata.
+        """
+        self._default_inbound = inbound
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         """Set the callback for sending messages."""
@@ -44,31 +49,49 @@ class MessageSender:
         media: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
-        message_id = message_id or self._default_message_id
+        inbound = self._default_inbound
+        target_channel = channel or (inbound.channel if inbound else "")
+        target_chat_id = chat_id or (inbound.chat_id if inbound else "")
 
-        if not channel or not chat_id:
+        if not target_channel or not target_chat_id:
             return "Error: No target channel/chat specified"
 
         if not self._send_callback:
             return "Error: Message sending not configured"
 
-        msg = OutboundMessage(
-            channel=channel,
-            chat_id=chat_id,
-            content=content,
-            media=media or [],
-            metadata={
-                "message_id": message_id,
-            },
-        )
+        # Build extra metadata. Only include message_id if explicitly provided —
+        # do not leak the inbound's own message_id unless the caller asks for it.
+        extra: dict[str, Any] = {}
+        if message_id is not None:
+            extra["message_id"] = message_id
+
+        # If replying to the bound inbound, inherit its thread context via the
+        # whitelist factory. Otherwise, build a bare message (caller is explicitly
+        # targeting a different chat, so thread context does not apply).
+        if inbound and target_channel == inbound.channel and target_chat_id == inbound.chat_id:
+            msg = OutboundMessage.reply_to_inbound(
+                inbound, content, extra_metadata=extra, media=media
+            )
+        else:
+            msg = OutboundMessage(
+                channel=target_channel,
+                chat_id=target_chat_id,
+                content=content,
+                media=media or [],
+                metadata=extra,
+            )
 
         try:
             await self._send_callback(msg)
-            if channel == self._default_channel and chat_id == self._default_chat_id:
-                self._sent_in_turn = True
+            # Mark turn as sent only if targeting the same chat AND same thread as
+            # the bound inbound. Comparing thread_ts/message_thread_id prevents a
+            # cross-thread send from suppressing the final reply to the original.
+            if inbound and target_channel == inbound.channel and target_chat_id == inbound.chat_id:
+                inbound_thread = (inbound.metadata or {}).get("thread_ts") or (inbound.metadata or {}).get("message_thread_id")
+                msg_thread = msg.metadata.get("thread_ts") or msg.metadata.get("message_thread_id")
+                if inbound_thread == msg_thread:
+                    self._sent_in_turn = True
             media_info = f" with {len(media)} attachments" if media else ""
-            return f"Message sent to {channel}:{chat_id}{media_info}"
+            return f"Message sent to {target_channel}:{target_chat_id}{media_info}"
         except Exception as e:
             return f"Error sending message: {str(e)}"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 from loguru import logger
@@ -121,6 +122,10 @@ class SlackChannel(BaseChannel):
         self._bot_user_id: str | None = None  # 봇 자기 user ID
         self._active_threads: dict[str, set[str]] = {}  # channel_id -> set of thread_ts
         self._progress_messages: dict[str, str] = {}  # chat_id:thread_ts → message ts
+        # Per-progress-key lock so the "check cache → post/update → record cache"
+        # sequence is atomic. Without this, two rapid _progress messages for the
+        # same thread could both miss the cache and post duplicate messages.
+        self._progress_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._consecutive_failures = 0
         self._log = logger.bind(channel="slack")
 
@@ -207,7 +212,11 @@ class SlackChannel(BaseChannel):
 
         is_progress = msg.metadata.get("_progress", False)
         thread_ts = msg.metadata.get("thread_ts")
-        progress_key = f"{msg.chat_id}:{thread_ts or ''}"
+        # Only cache/edit progress messages when a real thread context exists.
+        # DMs and bare channel posts (thread_ts falsy) always get fresh messages
+        # so the cache key cannot collapse and cross-contaminate unrelated chats.
+        use_progress_cache = is_progress and bool(thread_ts)
+        thread_key = f"{msg.chat_id}:{thread_ts}" if thread_ts else ""
 
         mrkdwn_text = _markdown_to_mrkdwn(msg.content) if msg.content else ""
 
@@ -225,34 +234,40 @@ class SlackChannel(BaseChannel):
         if not mrkdwn_text:
             return
 
-        if is_progress and progress_key in self._progress_messages:
-            # Edit existing progress message
-            try:
-                await self._app.client.chat_update(
-                    channel=msg.chat_id,
-                    ts=self._progress_messages[progress_key],
-                    text=mrkdwn_text,
-                )
-                return
-            except Exception as e:
-                self._log.debug("Failed to update progress message: {}", e)
-                # fallthrough to post new message
+        # Serialize the "check cache → post/update → record" sequence per thread.
+        # Without this, concurrent progress sends for the same thread race and
+        # post duplicates. Sends without a thread context take a per-chat fallback
+        # lock — effectively a no-op unless two bare posts collide.
+        lock_key = thread_key or f"nothread:{msg.chat_id}"
+        async with self._progress_locks[lock_key]:
+            if use_progress_cache and thread_key in self._progress_messages:
+                # Edit existing progress message in place
+                try:
+                    await self._app.client.chat_update(
+                        channel=msg.chat_id,
+                        ts=self._progress_messages[thread_key],
+                        text=mrkdwn_text,
+                    )
+                    return
+                except Exception as e:
+                    self._log.debug("Failed to update progress message: {}", e)
+                    # fallthrough to post new message
 
-        # Post new message
-        try:
-            for chunk in split_message(mrkdwn_text, SLACK_MAX_MESSAGE_LEN):
-                result = await self._app.client.chat_postMessage(
-                    channel=msg.chat_id,
-                    text=chunk,
-                    thread_ts=thread_ts,
-                )
-            if is_progress:
-                self._progress_messages[progress_key] = result["ts"]
-            else:
-                # 최종 응답이면 progress 메시지 추적 제거
-                self._progress_messages.pop(progress_key, None)
-        except Exception as e:
-            self._log.error("Error sending Slack message to {}: {}", msg.chat_id, e)
+            # Post new message(s)
+            try:
+                for chunk in split_message(mrkdwn_text, SLACK_MAX_MESSAGE_LEN):
+                    result = await self._app.client.chat_postMessage(
+                        channel=msg.chat_id,
+                        text=chunk,
+                        thread_ts=thread_ts,
+                    )
+                if use_progress_cache:
+                    self._progress_messages[thread_key] = result["ts"]
+                elif thread_key:
+                    # Final response in a thread — drop any tracked progress entry
+                    self._progress_messages.pop(thread_key, None)
+            except Exception as e:
+                self._log.error("Error sending Slack message to {}: {}", msg.chat_id, e)
 
     async def _download_files(self, event: dict) -> list[str]:
         """Download files attached to a Slack message to workspace."""
