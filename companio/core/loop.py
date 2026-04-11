@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 # `MessageSender.send(share_to_channel=...)` path is dead code. Instead, we
 # detect the user's imperative request on the raw inbound text and apply
 # `reply_broadcast=True` in `_apply_broadcast_intent` below.
-_BROADCAST_CHANNEL_TOKENS = ("채널", "channel")
+_BROADCAST_CHANNEL_TOKENS = ("채널", "channel", "본문")
 _BROADCAST_VERB_TOKENS_KO = (
     "공지", "공유", "알려", "알림", "올려", "올리", "브리핑",
     "방송", "보내", "전달", "안내",
@@ -40,10 +40,27 @@ _BROADCAST_STANDALONE_TOKENS = (
 )
 
 # 명령형 어미: "지금 ~해줘" 패턴. Korean requests that ask for immediate action.
+# Two alternation lanes:
+#   1) verb stem + optional auxiliary (`줘` / `주세요`) with optional separating space
+#      — handles "공지해", "공지해줘", "공지해 줘", "공지해 주세요" uniformly
+#   2) `~하고` connector form for specific 하다-verb stems — handles chained
+#      imperatives like "...스레드 요약하고 채널 본문 공지하고" where the final
+#      clause has no explicit 해/해줘 ending. Restricted to a fixed stem list so
+#      arbitrary `~하고` (e.g. "운동을 좋아하고") is NOT a false positive.
+# Trailing tolerance: after the verb we accept optional confirmation/agreement
+# fillers ("ok", "오케이", "응", "어", "네", "좋아", "땡큐") then optional Korean
+# punctuation/laughter chars before EOS. This lets "공지해 ok?" match while
+# still rejecting sentences whose semantic core ends elsewhere.
 _IMPERATIVE_ENDING = re.compile(
-    r"(해|해줘|해주세요|드려|드릴게|알려|알려줘|올려|올려줘|"
-    r"공유해|공지해|브리핑해|전달해|보내|보내줘|보내주세요)"
-    r"\s*[?!.~ㅋㅎ]*\s*$"
+    r"(?:"
+        r"(?:해|드려|드릴게|알려|올려|공유해|공지해|브리핑해|전달해|보내)"
+        r"(?:\s*(?:줘|주세요))?"
+        r"|"
+        r"(?:공지|공유|브리핑|전달|방송|안내|업데이트)하고"
+    r")"
+    r"(?:\s+(?:ok|okay|오케|오케이|응|어|네|좋아|땡큐|thanks|thank\s*you|plz|please))?"
+    r"\s*[?!.~ㅋㅎㅠ]*\s*$",
+    re.IGNORECASE,
 )
 
 # English: channel + verb bigram (avoids single-word false positives).

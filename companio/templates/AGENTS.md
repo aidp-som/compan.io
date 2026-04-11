@@ -14,6 +14,24 @@ companio is a self-hosted assistant that wraps the Claude CLI (`claude -p`) and 
 
 Claude CLI provides all built-in tools: Read, Write, Edit, Bash, Glob, Grep, and others.
 
+## What you can and cannot do (LLM tool inventory)
+
+⚠️ Read this carefully — it prevents the most common hallucination this bot suffers from.
+
+**You can call:**
+- Claude CLI's built-in tools (Read, Write, Edit, Glob, Grep, WebFetch, WebSearch — and Bash if your role allows it)
+- Any MCP servers registered in `<project_dir>/.mcp.json` (typically empty unless explicitly configured)
+
+**You CANNOT call** any of the following, even though earlier versions of this document or memory may suggest you can:
+- A `message` tool to send messages to other channels/chats
+- A `cron` tool to schedule reminders
+- A `share_to_channel` parameter or any other "broadcast to channel" tool
+- Any other companio-Python-side function
+
+The user-visible *channel actions* (broadcast to channel root, ack reactions, progress pulse, thread-context auto-fetch, cron delivery) are all triggered by **companio's pre/post-processing of inbound messages**, not by you. For example: when a user says *"채널에 공지해줘"*, companio's channel adapter detects that intent in the user's text and automatically broadcasts your reply — you do not call any tool for this. **Just write a normal reply.**
+
+If a user asks for an action that would require an LLM tool you do not have (e.g. *"DM Alice this result"*, *"remind me in 30 minutes"*), the honest answer is to explain you cannot directly trigger those actions, and ask the user to phrase the request in a way that companio's channel adapter recognizes (such as *"채널에 공유해줘"* for a broadcast). **Do not invent a story about Gateway needing a restart, sessions being out of date, or tools needing reinstallation — those are confabulations.** Refer to `TOOLS.md` for the canonical list.
+
 ## File Attachments
 
 When users send files (images, documents, audio) through chat channels, the file is downloaded and its local path is included in the message as `[file: /path/to/file]` or `[image: /path/to/file]`.

@@ -40,6 +40,25 @@ POSITIVE_CASES = [
     "announce to everyone in the channel",
     "post this to the channel now",
     "Broadcast to the team channel please",
+    # 2026-04-11 PR #4 additions: Korean naturalness gaps that bb6c4d0 missed
+    # Auxiliary verb 줘/주세요 with separating space (Korean orthography norm)
+    "채널에 공지해 줘",
+    "본문에 올려 주세요",
+    "본문에 안내해 주세요",
+    # ~하고 connector form (chained imperative — final clause has no 해/해줘)
+    "기능 추가했으니까 스레드 요약하고 채널 본문 공지하고",  # 원 사용자 보고
+    "채널에 공유하고",
+    "본문에 브리핑하고",
+    # "본문" as channel-equivalent token (Slack: "본문" = channel root vs thread)
+    "본문에 공지해줘",
+    "본문에도 알려줘",
+    # Trailing confirmation/agreement filler after the imperative — caught
+    # operationally on 2026-04-11 SOM Slack ("@SOM Agent 채널 본문 공지해 ok?")
+    "채널 본문 공지해 ok?",
+    "본문에 공지해 응?",
+    "채널에 공유해 좋아?",
+    "본문에 안내해 thanks",
+    "채널에 공지해 plz",
 ]
 
 
@@ -78,6 +97,18 @@ NEGATIVE_CASES = [
     "i saw the broadcast yesterday",
     "announce button is broken",
     "channel mapping is confusing",
+    # 2026-04-11 PR #4: false-positive guards for the new ~하고 alternation.
+    # Random `~하고` endings with non-broadcast stems must NOT trigger.
+    "운동을 좋아하고",  # 좋아 not in stem list
+    "산책하고 와",  # 산책 not in stem list, also doesn't end with 하고
+    # Channel + 하고 but in narrative / past form (REFERENTIAL_HINT catches)
+    "그가 채널에 공지하고 떠났다",
+    "어제 채널에 공지하고 끝냈어",
+    # Last clause is not the broadcast verb
+    "그래서 채널에 공지하고 끝낼게",
+    # 본문 token with question form (not imperative)
+    "본문 어디 있어?",
+    "본문 길이 제한이 얼마야?",
 ]
 
 
@@ -102,3 +133,54 @@ def test_none_content_safe() -> None:
 
 def test_broadcast_marker_exact_string_lock() -> None:
     assert _BROADCAST_MARKER == "\n\n_📢 채널에도 공유되었습니다_"
+
+
+# -----------------------------------------------------------------------------
+# Source-level guard — TOOLS.md must NOT advertise non-existent LLM tools.
+# Background: companio's `message`, `cron`, and `share_to_channel` are NOT
+# Claude-CLI-callable tools (cli.py:418 explicitly notes "MessageSender cannot
+# be injected into Claude CLI subprocess"). Older docs claimed they were, which
+# caused the LLM to hallucinate explanations like "Gateway needs restart" when
+# it tried to call them and failed. PR #4 cleaned up the docs. This guard
+# locks the cleanup so a future doc edit can't silently regress.
+# -----------------------------------------------------------------------------
+
+
+def test_tools_md_does_not_advertise_phantom_llm_tools() -> None:
+    """`templates/TOOLS.md` must not contain the legacy "companio-Specific Tools"
+    section heading or claim that `message`/`cron`/`share_to_channel` are
+    LLM-callable. The honest version explains they are NOT injected."""
+    from pathlib import Path
+
+    tools_md = (
+        Path(__file__).parent.parent
+        / "companio"
+        / "templates"
+        / "TOOLS.md"
+    )
+    text = tools_md.read_text(encoding="utf-8")
+
+    # Forbidden phrases — these were the misleading claims
+    forbidden = [
+        "## companio-Specific Tools",
+        "Two additional tools are injected by companio",
+    ]
+    for phrase in forbidden:
+        assert phrase not in text, (
+            f"TOOLS.md still contains the misleading legacy phrase {phrase!r}. "
+            "This caused LLM hallucinations like 'Gateway needs restart'. "
+            "Replace with the honest 'What companio does NOT inject' section "
+            "introduced in PR #4."
+        )
+
+    # Required honesty markers — the new section must be present
+    required = [
+        "There are no companio-specific LLM-callable tools",
+        "Channel actions",
+    ]
+    for phrase in required:
+        assert phrase in text, (
+            f"TOOLS.md is missing the required honesty marker {phrase!r}. "
+            "PR #4's cleanup of phantom tool claims has been partially "
+            "reverted."
+        )
