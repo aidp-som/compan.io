@@ -44,6 +44,10 @@ class SlackConfig(Base):
     respond_in_thread: bool = True  # Reply in thread when mentioned in channels
     ack_reactions_enabled: bool = False  # Send 👀 reaction on mention; remove on done
     progress_pulse_enabled: bool = False  # Edit progress message every 5s up to 4 times
+    broadcast_enabled: bool = False  # Master flag for share_to_channel reply_broadcast
+    broadcast_blocked_channels: list[str] = Field(
+        default_factory=list
+    )  # chat_id list — broadcast strictly skipped even when enabled
 
 
 class ChannelsConfig(Base):

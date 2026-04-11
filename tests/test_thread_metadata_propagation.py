@@ -120,6 +120,34 @@ class TestReplyToInbound:
         assert out.metadata["thread_ts"] == "1.23"
         assert out.metadata["message_ts"] == "1.23"
 
+    def test_reply_broadcast_not_in_whitelist(self):
+        # Regression guard for .feature/2026-04-11 PR 3: `reply_broadcast` is an
+        # OUTBOUND-only metadata key (set explicitly by MessageSender when
+        # share_to_channel=True passes the 3-layer guard). It must NEVER be
+        # auto-forwarded from inbound metadata, otherwise an attacker who can
+        # craft a Slack event with `reply_broadcast: true` could escalate any
+        # bot reply into a channel broadcast.
+        assert "reply_broadcast" not in _FORWARDED_METADATA_KEYS
+
+    def test_inbound_with_reply_broadcast_does_not_leak(self):
+        # Even if some path stuffs reply_broadcast into inbound.metadata, the
+        # whitelist factory must drop it.
+        inbound = InboundMessage(
+            channel="slack",
+            sender_id="U1",
+            chat_id="C1",
+            content="hi",
+            metadata={
+                "thread_ts": "1.23",
+                "is_channel": True,
+                "reply_broadcast": True,  # malicious / accidental injection
+            },
+        )
+        out = OutboundMessage.reply_to_inbound(inbound, "reply")
+        assert "reply_broadcast" not in out.metadata
+        assert out.metadata["thread_ts"] == "1.23"
+        assert out.metadata["is_channel"] is True
+
 
 # -----------------------------------------------------------------------------
 # B. MessageSender — binds to inbound and reuses reply_to_inbound

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from companio.bus import InboundMessage, MessageBus, OutboundMessage
+from companio.config.schema import Config, RoleConfig
 from companio.core.claude_cli import ClaudeCLI
 from companio.core.context import ContextBuilder
 from companio.core.memory import MemoryStore
@@ -22,7 +24,23 @@ from companio.tools.message import MessageSender
 if TYPE_CHECKING:
     from companio.cron import CronService
 
-from companio.config.schema import Config, RoleConfig
+# Shadow detector — matches phrases that *suggest* the user wants the answer
+# broadcast to the channel body. Hits do NOT trigger any action; they only
+# arm a post-turn check that the LLM honored the intent via share_to_channel.
+# Mismatches are logged at WARN as `slack.broadcast.shadow_miss` for metric
+# review (04-plan §1.6, §1.13).
+_BROADCAST_TRIGGER_PATTERN = re.compile(
+    r"(채널에도|채널에 공유|채널에 공지|채널에 알|다른 사람도|broadcast|"
+    r"공지해|방송해|모두에게|팀에 알|everyone)",
+    re.IGNORECASE,
+)
+
+
+def _detect_broadcast_intent(content: str) -> bool:
+    """Return True if `content` contains a broadcast trigger phrase."""
+    if not content:
+        return False
+    return bool(_BROADCAST_TRIGGER_PATTERN.search(content))
 
 # Progress pulse constants — see 04-plan.md §1.14a
 PULSE_INTERVAL_SECONDS = 5
@@ -52,7 +70,14 @@ class AgentLoop:
         self.context = ContextBuilder(workspace, bot_name=bot_name)
         self._session_manager = session_manager or SessionManager(workspace)
         self._config = config
-        self.message_sender = MessageSender(send_callback=bus.publish_outbound)
+        slack_cfg = config.channels.slack if config else None
+        self.message_sender = MessageSender(
+            send_callback=bus.publish_outbound,
+            broadcast_enabled=bool(slack_cfg.broadcast_enabled) if slack_cfg else False,
+            broadcast_blocked_channels=(
+                list(slack_cfg.broadcast_blocked_channels) if slack_cfg else []
+            ),
+        )
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
         self._session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -204,6 +229,12 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
+        # Shadow detector arming — record whether the inbound text *looks like*
+        # a broadcast request. We don't act on it. After processing we check
+        # whether the LLM actually called share_to_channel=True; mismatches are
+        # logged at WARN for metric review (04-plan §1.6).
+        broadcast_intent_detected = _detect_broadcast_intent(msg.content)
+
         key = msg.session_key
         session = await self._session_manager.get_or_create(key)
 
@@ -224,6 +255,37 @@ class AgentLoop:
         # channel/chat/thread identity. MessageSender pulls what it needs internally.
         self.message_sender.set_context(msg)
         self.message_sender.start_turn()
+        try:
+            return await self._invoke_claude_turn(
+                msg, session, key, broadcast_intent_detected
+            )
+        finally:
+            # Shadow detector audit (04-plan §1.6, §1.13). WARN-only — never
+            # blocks the response. Records metric for 2-week LLM-trigger review.
+            if (
+                broadcast_intent_detected
+                and not self.message_sender._broadcast_called
+            ):
+                logger.warning(
+                    "slack.broadcast.shadow_miss chat_id={} content={!r}",
+                    msg.chat_id,
+                    msg.content[:200],
+                )
+
+    async def _invoke_claude_turn(
+        self,
+        msg: InboundMessage,
+        session: Session,
+        key: str,
+        broadcast_intent_detected: bool,
+    ) -> OutboundMessage | None:
+        """Run the Claude CLI for one turn and return the final outbound (if any).
+
+        Extracted from `_process_message` so the shadow-detector finally clause
+        in the caller can wrap every exit path uniformly. `broadcast_intent_detected`
+        is only carried for symmetry — the audit happens in `_process_message`.
+        """
+        del broadcast_intent_detected  # audited by caller's finally clause
 
         # Send ACK to user (so they know we're processing)
         await self.bus.publish_outbound(

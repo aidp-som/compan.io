@@ -281,14 +281,35 @@ class SlackChannel(BaseChannel):
                     self._log.debug("Failed to update progress message: {}", e)
                     # fallthrough to post new message
 
+            # Defense in depth: even if MessageSender's 3-layer guard misfires,
+            # SlackChannel re-validates every condition before honoring
+            # reply_broadcast=True. The flag is dropped if any check fails.
+            reply_broadcast_flag = (
+                bool(msg.metadata.get("reply_broadcast", False))
+                and bool(thread_ts)
+                and bool(msg.metadata.get("is_channel", False))
+                and msg.chat_id not in self.config.broadcast_blocked_channels
+            )
+
             # Post new message(s)
             try:
-                for chunk in split_message(mrkdwn_text, SLACK_MAX_MESSAGE_LEN):
+                chunks = list(split_message(mrkdwn_text, SLACK_MAX_MESSAGE_LEN))
+                for i, chunk in enumerate(chunks):
+                    is_last = i == len(chunks) - 1
+                    chunk_broadcast = reply_broadcast_flag and is_last
                     result = await self._app.client.chat_postMessage(
                         channel=msg.chat_id,
                         text=chunk,
                         thread_ts=thread_ts,
+                        reply_broadcast=chunk_broadcast,
                     )
+                    if chunk_broadcast:
+                        self._log.info(
+                            "slack.broadcast.sent chat_id={} thread_ts={} content_len={}",
+                            msg.chat_id,
+                            thread_ts,
+                            len(chunk),
+                        )
                 if use_progress_cache:
                     self._progress_messages[thread_key] = result["ts"]
                 elif thread_key:
