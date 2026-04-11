@@ -17,6 +17,14 @@ Two additional tools are injected by companio:
 - Scheduling options: `every_seconds`, `cron_expr` (with optional `tz`), `at` (ISO datetime)
 - Refer to the cron skill for detailed usage
 
+## Channel Auto-Context
+
+### Slack thread auto-fetch
+
+When you are mentioned (`@<bot>`) inside an existing Slack thread, the channel adapter automatically fetches up to N prior messages from that thread (default 20, capped per `SlackConfig.thread_context_max_limit`) and prepends them to your input as a `<external-context trust="low">` block. You receive that block as part of the user message — no tool call needed. Required Slack OAuth scopes: `channels:history`, `groups:history`, `im:history`, `mpim:history`, plus `users:read` for display-name resolution. The fetch is silently disabled at runtime if the workspace is missing any of these scopes.
+
+Phrases like "전체 다 읽어줘", "처음부터", "이전 30개" in the user message escalate the fetch limit (shadow-detected via regex; logged as `slack.thread_context.shadow_match`).
+
 ## Workspace Files
 
 The following files in the workspace directory are managed by companio:

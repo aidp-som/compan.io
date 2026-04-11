@@ -48,6 +48,15 @@ class SlackConfig(Base):
     broadcast_blocked_channels: list[str] = Field(
         default_factory=list
     )  # chat_id list — broadcast strictly skipped even when enabled
+    # Auto-fetch the parent thread's messages on app_mention so the LLM sees prior
+    # context written by other users. Required scopes: channels:history, groups:history,
+    # im:history, mpim:history. Falls back to runtime-disabled on missing_scope.
+    thread_context_enabled: bool = True
+    thread_context_default_limit: int = 20  # messages fetched per mention by default
+    thread_context_max_limit: int = 200  # cap when user intent triggers a deeper fetch
+    thread_context_blocked_channels: list[str] = Field(
+        default_factory=list
+    )  # chat_id list — fetch strictly skipped even when enabled (e.g. #hr, #finance)
 
 
 class ChannelsConfig(Base):
