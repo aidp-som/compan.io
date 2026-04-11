@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
@@ -17,6 +18,11 @@ from companio.helpers import split_message
 
 SLACK_MAX_MESSAGE_LEN = 3000  # Slack 메시지 안전 길이
 MAX_RECONNECT_FAILURES = 5
+
+# ACK reaction lifecycle constants (04-plan §1.9, §1.14)
+_ACK_REACTIONS_TTL = timedelta(hours=1)
+_ACK_REACTIONS_MAX_SIZE = 500
+_ACK_EYES = "eyes"
 
 WINDOWS_SLACK_INSTALL_GUIDE = """\
 안녕하세요! SOM ERP Slack에 오신 것을 환영합니다 :wave:
@@ -126,6 +132,16 @@ class SlackChannel(BaseChannel):
         # sequence is atomic. Without this, two rapid _progress messages for the
         # same thread could both miss the cache and post duplicate messages.
         self._progress_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # ACK reaction lifecycle state (04-plan §1.9). Bounded OrderedDict so a
+        # missed `done` event cannot leak memory; insertion order doubles as LRU.
+        # value: {"added_at": datetime, "task": asyncio.Task[bool]}
+        self._active_ack_reactions: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._ack_reactions_lock = asyncio.Lock()
+        # Flips to True if the workspace is missing the reactions:write scope or the
+        # token is invalid — prevents repeated 4xx storms (04-plan §1.11).
+        self._ack_reactions_runtime_disabled = False
+        # Suppress repeated WARN spam for the same chat after the bot is removed.
+        self._ack_not_in_channel_warned: set[str] = set()
         self._consecutive_failures = 0
         self._log = logger.bind(channel="slack")
 
@@ -210,6 +226,18 @@ class SlackChannel(BaseChannel):
             self._log.warning("Slack bot not running")
             return
 
+        # Done lifecycle (04-plan §1.3): a reaction-only outbound carries
+        # _reaction_lifecycle in metadata and (usually) empty content. Finalize the
+        # 👀 reaction here, then either skip text dispatch (empty content) or fall
+        # through to send the text payload alongside.
+        lifecycle = msg.metadata.get("_reaction_lifecycle")
+        if lifecycle in ("done_success", "done_error"):
+            message_ts = msg.metadata.get("message_ts")
+            if message_ts:
+                await self._finalize_reaction(msg.chat_id, message_ts)
+            if not msg.content:
+                return  # reaction-only outbound — no text to send
+
         is_progress = msg.metadata.get("_progress", False)
         thread_ts = msg.metadata.get("thread_ts")
         # Only cache/edit progress messages when a real thread context exists.
@@ -268,6 +296,209 @@ class SlackChannel(BaseChannel):
                     self._progress_messages.pop(thread_key, None)
             except Exception as e:
                 self._log.error("Error sending Slack message to {}: {}", msg.chat_id, e)
+
+    # ------------------------------------------------------------------
+    # Reaction helpers (04-plan §1.2, §1.11)
+    # ------------------------------------------------------------------
+
+    async def _add_reaction(self, chat_id: str, message_ts: str, name: str) -> bool:
+        """Add a reaction to a message.
+
+        Graceful per the 9-error matrix in 04-plan.md §1.11. Never raises;
+        returns True only on a confirmed `ok` from the Slack API.
+        """
+        if not self._app:
+            return False
+        try:
+            await self._app.client.reactions_add(
+                channel=chat_id, timestamp=message_ts, name=name
+            )
+            self._log.debug(
+                "slack.reaction.add status=ok chat_id={} message_ts={}",
+                chat_id, message_ts,
+            )
+            return True
+        except Exception as e:
+            return await self._handle_reaction_error(
+                e, chat_id, message_ts, name, op="add"
+            )
+
+    async def _remove_reaction(self, chat_id: str, message_ts: str, name: str) -> bool:
+        """Remove a reaction from a message. Same graceful contract as add."""
+        if not self._app:
+            return False
+        try:
+            await self._app.client.reactions_remove(
+                channel=chat_id, timestamp=message_ts, name=name
+            )
+            self._log.debug(
+                "slack.reaction.remove status=ok chat_id={} message_ts={}",
+                chat_id, message_ts,
+            )
+            return True
+        except Exception as e:
+            return await self._handle_reaction_error(
+                e, chat_id, message_ts, name, op="remove"
+            )
+
+    async def _handle_reaction_error(
+        self, exc: Exception, chat_id: str, message_ts: str, name: str, *, op: str,
+    ) -> bool:
+        """Map a SlackApiError (or other) onto the 9-error matrix in 04-plan §1.11.
+
+        Returns True only if a retry succeeded; otherwise False. Never raises.
+        """
+        # Lazy import keeps the slack_sdk dependency optional at module import time.
+        slack_api_error_cls: type | None
+        try:
+            from slack_sdk.errors import SlackApiError as slack_api_error_cls
+        except Exception:  # pragma: no cover - slack_sdk should always be present
+            slack_api_error_cls = None
+
+        if slack_api_error_cls is None or not isinstance(exc, slack_api_error_cls):
+            self._log.warning(
+                "slack.reaction.{} status=error chat_id={} message_ts={} err={}",
+                op, chat_id, message_ts, exc,
+            )
+            return False
+
+        response = getattr(exc, "response", None)
+        err: str | None = None
+        if response is not None and hasattr(response, "get"):
+            try:
+                err = response.get("error")
+            except Exception:
+                err = None
+
+        # Silent / idempotent cases — debug only.
+        if err in ("already_reacted", "message_not_found", "no_reaction", "not_reacted"):
+            self._log.debug(
+                "slack.reaction.{} status={} chat_id={} message_ts={}",
+                op, err, chat_id, message_ts,
+            )
+            return False
+
+        # Bot kicked from channel — warn once per chat to avoid spam.
+        if err == "not_in_channel":
+            if chat_id not in self._ack_not_in_channel_warned:
+                self._ack_not_in_channel_warned.add(chat_id)
+                self._log.warning(
+                    "slack.reaction.{} status=not_in_channel chat_id={} (warned once)",
+                    op, chat_id,
+                )
+            return False
+
+        # Hard auth/scope failures — disable runtime so we stop hammering the API.
+        if err in ("invalid_auth", "missing_scope"):
+            self._ack_reactions_runtime_disabled = True
+            self._log.error(
+                "slack.reaction.{} status={} chat_id={} message_ts={} — "
+                "runtime-disabling ack reactions",
+                op, err, chat_id, message_ts,
+            )
+            return False
+
+        # Rate limited — single retry honoring Retry-After.
+        if err == "ratelimited":
+            retry_after = 1
+            try:
+                headers = getattr(response, "headers", None) or {}
+                ra = headers.get("Retry-After") if hasattr(headers, "get") else None
+                if ra is not None:
+                    retry_after = int(ra)
+            except Exception:
+                pass
+            self._log.warning(
+                "slack.reaction.{} status=ratelimited chat_id={} message_ts={} "
+                "retry_after={}s",
+                op, chat_id, message_ts, retry_after,
+            )
+            try:
+                await asyncio.sleep(retry_after)
+                if op == "add":
+                    await self._app.client.reactions_add(
+                        channel=chat_id, timestamp=message_ts, name=name
+                    )
+                else:
+                    await self._app.client.reactions_remove(
+                        channel=chat_id, timestamp=message_ts, name=name
+                    )
+                self._log.debug(
+                    "slack.reaction.{} status=ok_after_retry chat_id={} message_ts={}",
+                    op, chat_id, message_ts,
+                )
+                return True
+            except Exception as retry_exc:
+                self._log.warning(
+                    "slack.reaction.{} status=retry_failed chat_id={} message_ts={} "
+                    "err={}",
+                    op, chat_id, message_ts, retry_exc,
+                )
+                return False
+
+        # Anything else — defensive WARN, no raise.
+        self._log.warning(
+            "slack.reaction.{} status=error chat_id={} message_ts={} err={}",
+            op, chat_id, message_ts, err or exc,
+        )
+        return False
+
+    async def _send_ack_reaction(self, chat_id: str, message_ts: str) -> None:
+        """Schedule a 👀 reaction add for (chat_id, message_ts), idempotent.
+
+        Runs lock-protected only for the bookkeeping; the actual API call happens
+        inside the asyncio.Task so it never blocks the inbound dispatch path
+        (04-plan §1.2 — lock-free latency is the core value).
+        """
+        key = (chat_id, message_ts)
+        async with self._ack_reactions_lock:
+            now = datetime.now()
+            # Lazy TTL cleanup so a quiet bot does not accumulate stale entries.
+            expired = [
+                k for k, v in self._active_ack_reactions.items()
+                if now - v["added_at"] > _ACK_REACTIONS_TTL
+            ]
+            for k in expired:
+                self._active_ack_reactions.pop(k, None)
+            # Bound size — evict oldest insertion.
+            while len(self._active_ack_reactions) >= _ACK_REACTIONS_MAX_SIZE:
+                self._active_ack_reactions.popitem(last=False)
+            # Dedup: a Slack retry of the same event must not double-add.
+            if key in self._active_ack_reactions:
+                return
+            task = asyncio.create_task(
+                self._add_reaction(chat_id, message_ts, _ACK_EYES)
+            )
+            self._active_ack_reactions[key] = {"added_at": now, "task": task}
+
+    async def _finalize_reaction(self, chat_id: str, message_ts: str) -> None:
+        """Finalize the lifecycle: await the pending add task then remove the eyes.
+
+        Awaiting the add task first prevents the add/remove race when a Claude
+        turn is so fast it overlaps the in-flight `reactions.add` (04-plan §1.9).
+        Silent if no prior ack was registered for this key.
+        """
+        key = (chat_id, message_ts)
+        async with self._ack_reactions_lock:
+            entry = self._active_ack_reactions.pop(key, None)
+        if entry is None:
+            return
+        task = entry.get("task")
+        if task is not None:
+            try:
+                await task
+            except Exception:
+                # Add already swallowed its own errors; defensive only.
+                pass
+        await self._remove_reaction(chat_id, message_ts, _ACK_EYES)
+
+    def _should_send_ack(self, message_ts: str | None) -> bool:
+        """Gate for ack reactions: feature flag, runtime disable, presence of ts."""
+        return bool(
+            self.config.ack_reactions_enabled
+            and not self._ack_reactions_runtime_disabled
+            and message_ts
+        )
 
     async def _download_files(self, event: dict) -> list[str]:
         """Download files attached to a Slack message to workspace."""
@@ -349,6 +580,13 @@ class SlackChannel(BaseChannel):
             "is_channel": True,
         }
 
+        # Fire-and-store the 👀 ack outside any per-session lock so direct-prior
+        # work in flight cannot delay the user-visible reaction (04-plan §1.2).
+        if self._should_send_ack(metadata.get("message_ts")):
+            asyncio.create_task(
+                self._send_ack_reaction(chat_id, metadata["message_ts"])
+            )
+
         await self._handle_message(
             sender_id=sender_id,
             chat_id=chat_id,
@@ -391,6 +629,12 @@ class SlackChannel(BaseChannel):
                 "is_channel": False,
             }
 
+            # DM ack — same lock-free fire-and-store as channel mentions.
+            if self._should_send_ack(metadata.get("message_ts")):
+                asyncio.create_task(
+                    self._send_ack_reaction(chat_id, metadata["message_ts"])
+                )
+
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=chat_id,
@@ -423,6 +667,13 @@ class SlackChannel(BaseChannel):
                 "message_ts": event.get("ts"),
                 "is_channel": True,
             }
+
+            # Channel-thread ack — same lock-free fire-and-store.
+            if self._should_send_ack(metadata.get("message_ts")):
+                asyncio.create_task(
+                    self._send_ack_reaction(chat_id, metadata["message_ts"])
+                )
+
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=chat_id,

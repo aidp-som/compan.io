@@ -96,6 +96,30 @@ class TestReplyToInbound:
             "message_id", "is_channel", "is_group",
         })
 
+    def test_reaction_lifecycle_not_in_whitelist(self):
+        # `_reaction_lifecycle` is an outbound-only synthesized key (WO-P1-01 §3-6).
+        # It must NEVER be inheritable from inbound metadata, otherwise a hostile
+        # or buggy inbound could trigger spurious reaction finalize calls.
+        assert "_reaction_lifecycle" not in _FORWARDED_METADATA_KEYS
+
+    def test_inbound_with_reaction_lifecycle_does_not_leak(self):
+        # If an inbound carries `_reaction_lifecycle` (e.g. via Slack message
+        # metadata roundtrip), reply_to_inbound must drop it. extra_metadata
+        # remains the only sanctioned channel for synthesizing the marker.
+        inbound = InboundMessage(
+            channel="slack", sender_id="U1", chat_id="C1", content="hello",
+            metadata={
+                "thread_ts": "1.23",
+                "message_ts": "1.23",
+                "_reaction_lifecycle": "done_success",  # forged
+            },
+        )
+        out = OutboundMessage.reply_to_inbound(inbound, "reply")
+        assert "_reaction_lifecycle" not in out.metadata
+        # Whitelisted keys still pass through
+        assert out.metadata["thread_ts"] == "1.23"
+        assert out.metadata["message_ts"] == "1.23"
+
 
 # -----------------------------------------------------------------------------
 # B. MessageSender — binds to inbound and reuses reply_to_inbound

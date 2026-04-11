@@ -42,6 +42,7 @@ class SlackConfig(Base):
     app_token: str = ""  # xapp-... App-Level Token for Socket Mode
     allow_from: list[str] = Field(default_factory=list)  # Slack user IDs (e.g. ["U12345678"])
     respond_in_thread: bool = True  # Reply in thread when mentioned in channels
+    ack_reactions_enabled: bool = False  # Send 👀 reaction on mention; remove on done
 
 
 class ChannelsConfig(Base):

@@ -128,20 +128,39 @@ class AgentLoop:
         await self.bus.publish_outbound(OutboundMessage.reply_to_inbound(msg, content))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process under per-session lock."""
+        """Process under per-session lock.
+
+        try/finally guarantees a `_reaction_lifecycle` outbound is published in
+        every terminal state — normal, exception, cancellation — so SlackChannel
+        can finalize the 👀 ack reaction without any path leaking. The flag is
+        only carried in metadata; non-Slack channels ignore it as a no-op.
+        See 04-plan.md §1.10.
+        """
+        success: bool | None = None
         async with self._session_locks[msg.session_key]:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
                     await self.bus.publish_outbound(response)
+                success = True
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
+                success = False
                 raise
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
+                success = False
                 await self.bus.publish_outbound(
                     OutboundMessage.reply_to_inbound(msg, "Sorry, I encountered an error.")
                 )
+            finally:
+                if success is not None and msg.metadata.get("message_ts"):
+                    lifecycle = "done_success" if success else "done_error"
+                    await self.bus.publish_outbound(
+                        OutboundMessage.reply_to_inbound(
+                            msg, "", extra_metadata={"_reaction_lifecycle": lifecycle},
+                        )
+                    )
 
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """Process a single message via Claude CLI."""
