@@ -57,6 +57,12 @@ echo "OS: $OS"
 - companio installed: check the venv path (may differ from Linux — ask user for path if `compan.io` not at expected location)
 - PM2 startup configured: `pm2 startup` (only needs to run once per machine)
 
+### Windows prerequisites (Git Bash / MSYS2)
+- Node.js + npm: `node --version && npm --version`
+- PM2 installed: `pm2 --version` (if missing: `npm install -g pm2 pm2-windows-startup`)
+- companio installed: `companio --version` (pip install, typically editable from a local checkout)
+- PM2 Windows startup configured: `pm2-startup install` (registers a Windows startup registry entry; only needed once per machine)
+
 ## Step 3: Create Instance Directory
 
 Run the template setup script:
@@ -163,6 +169,26 @@ If this is the first instance on the Mac, also run:
 pm2 startup launchd
 pm2 save
 ```
+
+### Windows — PM2
+
+```bash
+CONFIG_PATH="C:/Users/{username}/.companio-{name}/config.json"
+CWD="C:/Users/{username}/Documents/companio-{name}"
+
+pm2 start companio \
+  --name "companio-{name}" \
+  -- gateway --config "$CONFIG_PATH"
+
+pm2 save
+
+# First-time Windows setup: register PM2 to start on boot
+npm install -g pm2-windows-startup   # only needed once
+pm2-startup install                  # registers Windows startup registry entry
+pm2 save                             # saves process list for resurrection
+```
+
+Key differences from macOS: no `--interpreter` needed (companio is a pip script), `pm2-windows-startup` replaces `pm2 startup launchd`, paths use forward slashes in Git Bash.
 
 ## Step 5: Verify
 

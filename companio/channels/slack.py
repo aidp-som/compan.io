@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import sys
 import time
+import unicodedata
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,7 +21,15 @@ from companio.config.schema import SlackConfig
 from companio.helpers import split_message
 
 SLACK_MAX_MESSAGE_LEN = 3000  # Slack 메시지 안전 길이
-MAX_RECONNECT_FAILURES = 5
+
+# Reconnection resilience (2026-04-14 crash-loop analysis).
+# Old: 5 failures × 5s fixed = 25s budget → crash on any DNS hiccup > 25s.
+# New: exponential backoff (5s → 10s → 20s → ... → 5min cap) with jitter.
+# 10 failures ≈ 15 minutes of retry budget before exit.
+MAX_RECONNECT_FAILURES = 10
+_RECONNECT_BASE_DELAY = 5.0
+_RECONNECT_MAX_DELAY = 300.0
+_RECONNECT_JITTER = 0.3
 
 # ACK reaction lifecycle constants (04-plan §1.9, §1.14)
 _ACK_REACTIONS_TTL = timedelta(hours=1)
@@ -222,9 +232,33 @@ class SlackChannel(BaseChannel):
         async def handle_member_joined(event, say):  # noqa: ARG001
             await self._on_member_joined(event)
 
-        # Connect via Socket Mode
+        # Connect via Socket Mode — with retry for initial connection.
+        # DNS/network may be flaky at startup (especially on Windows where
+        # Dnscache negative caching can block for seconds). Retry with the
+        # same exponential backoff used by the health-check loop.
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
-        await self._handler.connect_async()
+        for attempt in range(MAX_RECONNECT_FAILURES):
+            try:
+                await self._handler.connect_async()
+                break  # connected
+            except Exception as e:
+                delay = min(
+                    _RECONNECT_BASE_DELAY * (2 ** attempt),
+                    _RECONNECT_MAX_DELAY,
+                )
+                jitter = delay * _RECONNECT_JITTER * (2 * random.random() - 1)
+                wait = max(1.0, delay + jitter)
+                self._log.error(
+                    "Slack initial connection failed (attempt {}/{}, retrying in ~{:.0f}s): {}",
+                    attempt + 1, MAX_RECONNECT_FAILURES, wait, e,
+                )
+                if attempt + 1 >= MAX_RECONNECT_FAILURES:
+                    self._log.critical(
+                        "Slack initial connection failed after {} attempts, exiting",
+                        MAX_RECONNECT_FAILURES,
+                    )
+                    sys.exit(1)
+                await asyncio.sleep(wait)
 
         # Get bot's own user ID via auth.test
         try:
@@ -234,9 +268,24 @@ class SlackChannel(BaseChannel):
         except Exception as e:
             self._log.error("Failed to get Slack bot identity: {}", e)
 
-        # Keep running with health check
+        # Keep running with health check — exponential backoff on failures.
+        # When healthy, polls every _RECONNECT_BASE_DELAY seconds.
+        # On consecutive failures, delay doubles each time (capped at
+        # _RECONNECT_MAX_DELAY) with jitter. After MAX_RECONNECT_FAILURES
+        # consecutive failures, exits for process-manager restart.
         while self._running:
-            await asyncio.sleep(5)
+            if self._consecutive_failures == 0:
+                delay = _RECONNECT_BASE_DELAY
+            else:
+                raw = min(
+                    _RECONNECT_BASE_DELAY * (2 ** self._consecutive_failures),
+                    _RECONNECT_MAX_DELAY,
+                )
+                jitter = raw * _RECONNECT_JITTER * (2 * random.random() - 1)
+                delay = max(1.0, raw + jitter)
+
+            await asyncio.sleep(delay)
+
             try:
                 connected = await self._handler.client.is_connected()
             except Exception:
@@ -244,15 +293,52 @@ class SlackChannel(BaseChannel):
 
             if not connected:
                 self._consecutive_failures += 1
+                next_delay = min(
+                    _RECONNECT_BASE_DELAY * (2 ** self._consecutive_failures),
+                    _RECONNECT_MAX_DELAY,
+                )
                 self._log.error(
-                    "Slack WebSocket disconnected (failure {}/{})",
+                    "Slack WebSocket disconnected (failure {}/{}, next check in ~{:.0f}s)",
                     self._consecutive_failures,
                     MAX_RECONNECT_FAILURES,
+                    next_delay,
                 )
+
+                # Active reconnect attempt — instead of passively waiting for
+                # slack-bolt's internal reconnect, explicitly close + re-open
+                # the socket. This is more aggressive but recovers faster from
+                # DNS blips where the old connection object is stuck.
+                try:
+                    if self._handler:
+                        try:
+                            await self._handler.close()
+                        except Exception:
+                            pass
+                        from slack_bolt.adapter.socket_mode.async_handler import (
+                            AsyncSocketModeHandler,
+                        )
+                        self._handler = AsyncSocketModeHandler(
+                            self._app, self.config.app_token
+                        )
+                        await self._handler.connect_async()
+                        self._log.info(
+                            "Slack active reconnect succeeded after {} failures",
+                            self._consecutive_failures,
+                        )
+                        self._consecutive_failures = 0
+                        continue
+                except Exception as e:
+                    self._log.warning("Slack active reconnect failed: {}", e)
+
                 if self._consecutive_failures >= MAX_RECONNECT_FAILURES:
                     self._log.critical(
-                        "Slack reconnection failed {} times, exiting for systemd restart",
+                        "Slack reconnection failed {} times (~{:.0f}min of retries), "
+                        "exiting for process-manager restart",
                         MAX_RECONNECT_FAILURES,
+                        sum(
+                            min(_RECONNECT_BASE_DELAY * (2 ** i), _RECONNECT_MAX_DELAY)
+                            for i in range(MAX_RECONNECT_FAILURES)
+                        ) / 60,
                     )
                     sys.exit(1)
             else:
@@ -984,6 +1070,10 @@ class SlackChannel(BaseChannel):
 
             # 파일명 안전화
             filename = file_info.get("name", f"slack_file_{file_info.get('id', 'unknown')}")
+            # macOS 에서 업로드된 한글 파일명은 NFD(자모 분리)로 들어온다. Windows 파일
+            # 시스템에 NFD 로 저장되면 Python pathlib 은 NFC 로 정규화해 찾기 때문에
+            # Read/Glob 가 파일을 찾지 못한다. 저장 전에 NFC 로 통일해 이 불일치를 제거.
+            filename = unicodedata.normalize("NFC", filename)
             # 경로 traversal 방지
             safe_name = Path(filename).name  # .. 제거
             target = (media_dir / safe_name).resolve()
