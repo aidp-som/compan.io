@@ -101,7 +101,17 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
             return int(next_dt.timestamp() * 1000)
-        except Exception:
+        except Exception as e:
+            # Silent failure here used to strand every cron job with
+            # nextRunAtMs=None (e.g. Windows hosts missing the tzdata
+            # package → ZoneInfoNotFoundError). Surface the reason.
+            logger.warning(
+                "Cron: failed to compute next run for expr={!r} tz={!r}: {}: {}",
+                schedule.expr,
+                schedule.tz,
+                type(e).__name__,
+                e,
+            )
             return None
 
     return None
