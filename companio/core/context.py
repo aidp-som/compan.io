@@ -14,6 +14,9 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
+    _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+    _MEDIA_CONTEXT_OPEN = '<external-context trust="medium" source="channel-upload">'
+    _MEDIA_CONTEXT_CLOSE = "</external-context>"
 
     def __init__(self, workspace: Path, bot_name: str = "companio"):
         self.workspace = workspace
@@ -134,6 +137,35 @@ Reply directly with text for all responses. For scheduled tasks (cron), your res
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    @staticmethod
+    def format_media_tags(media: list[str]) -> str:
+        """Format media paths as an attachment block for Claude prompt injection.
+
+        Wraps one-per-line ``[image: /path]`` / ``[file: /path]`` tags in an
+        ``<external-context trust="medium" source="channel-upload">`` block so
+        the LLM can distinguish bot-injected attachments from text the user
+        may have typed (which might contain look-alike tags as prompt
+        injection). Filters out falsy entries (download failures leaving
+        empty paths) and de-duplicates while preserving order.
+
+        Returns an empty string when ``media`` is empty or contains only
+        falsy entries — callers can safely concatenate the result.
+        """
+        paths = [p for p in dict.fromkeys(media) if p]
+        if not paths:
+            return ""
+        lines = []
+        for path in paths:
+            ext = Path(path).suffix.lower()
+            tag = "image" if ext in ContextBuilder._IMAGE_EXTS else "file"
+            lines.append(f"[{tag}: {path}]")
+        body = "\n".join(lines)
+        return (
+            f"\n\n{ContextBuilder._MEDIA_CONTEXT_OPEN}\n"
+            f"{body}\n"
+            f"{ContextBuilder._MEDIA_CONTEXT_CLOSE}"
+        )
 
     @staticmethod
     def format_history(messages: list[dict]) -> str:

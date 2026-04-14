@@ -475,6 +475,21 @@ class AgentLoop:
                 "</external-context>\n\n"
             )
 
+        # Channel-uploaded media (images/files). Wrap the downloaded paths in a
+        # trusted attachment block so the LLM treats them as real attachments
+        # and distinguishes them from look-alike [file: ...] tags a user may
+        # have typed into the message body (prompt injection defense).
+        media_block = ContextBuilder.format_media_tags(msg.media)
+        if msg.media:
+            logger.info(
+                "Injecting {} media attachment(s) for {}:{} exts={}",
+                len(msg.media),
+                msg.channel,
+                msg.chat_id,
+                [Path(p).suffix.lower() for p in msg.media],
+            )
+        user_block = f"{thread_context_block}{msg.content}{media_block}"
+
         # Check if we have an existing Claude CLI session for this chat
         claude_sid = self._claude_session_ids.get(key)
 
@@ -494,7 +509,7 @@ class AgentLoop:
         if claude_sid:
             # Resume existing session — no system prompt or history needed
             runtime_ctx = ContextBuilder._build_runtime_context(msg.channel, msg.chat_id, context_metadata)
-            full_message = f"{runtime_ctx}\n\n{thread_context_block}{msg.content}"
+            full_message = f"{runtime_ctx}\n\n{user_block}"
             response = await self.claude.run(
                 message=full_message, resume_session_id=claude_sid,
                 **role_tools,
@@ -516,7 +531,7 @@ class AgentLoop:
             full_message = f"{runtime_ctx}\n\n"
             if history_text:
                 full_message += f"## Recent Conversation\n{history_text}\n\n"
-            full_message += f"## Current Message\n{thread_context_block}{msg.content}"
+            full_message += f"## Current Message\n{user_block}"
 
             new_session_id = str(uuid.uuid4())
             response = await self.claude.run(

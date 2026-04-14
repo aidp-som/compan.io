@@ -7,6 +7,7 @@ import random
 import re
 import sys
 import time
+import unicodedata
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1069,6 +1070,10 @@ class SlackChannel(BaseChannel):
 
             # 파일명 안전화
             filename = file_info.get("name", f"slack_file_{file_info.get('id', 'unknown')}")
+            # macOS 에서 업로드된 한글 파일명은 NFD(자모 분리)로 들어온다. Windows 파일
+            # 시스템에 NFD 로 저장되면 Python pathlib 은 NFC 로 정규화해 찾기 때문에
+            # Read/Glob 가 파일을 찾지 못한다. 저장 전에 NFC 로 통일해 이 불일치를 제거.
+            filename = unicodedata.normalize("NFC", filename)
             # 경로 traversal 방지
             safe_name = Path(filename).name  # .. 제거
             target = (media_dir / safe_name).resolve()
