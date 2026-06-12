@@ -340,7 +340,8 @@ def _convert_zip(file_path: Path) -> ConversionResult:
                     if info.is_dir():
                         continue
                     # Security: path traversal prevention
-                    if ".." in info.filename or info.filename.startswith("/"):
+                    target = (tmp_path / info.filename).resolve()
+                    if not target.is_relative_to(tmp_path.resolve()):
                         logger.warning("Skipping suspicious zip entry: {}", info.filename)
                         continue
 

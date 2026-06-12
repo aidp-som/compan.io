@@ -99,6 +99,35 @@ def test_file_count_limit():
         assert "제한 초과로 생략" in md
 
 
+def test_zip_bomb_rejected():
+    from companio.converters import _MAX_ZIP_EXTRACTED_SIZE
+    with tempfile.TemporaryDirectory() as tmp:
+        zp = Path(tmp) / "bomb.zip"
+        # Create a file that exceeds the extracted size limit
+        chunk = b"A" * (1024 * 1024)  # 1MB chunk
+        with zipfile.ZipFile(zp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # Write enough 1MB files to exceed the 50MB limit
+            for i in range(55):
+                zf.writestr(f"big_{i:03d}.txt", chunk)
+        result = convert_if_needed(zp)
+        assert not result.converted
+        assert "too large" in result.meta
+
+
+def test_nested_directory_structure():
+    with tempfile.TemporaryDirectory() as tmp:
+        zp = _make_zip({
+            "docs/readme.txt": "top level readme",
+            "docs/sub/notes.md": "# Nested notes",
+        }, Path(tmp) / "nested.zip")
+        result = convert_if_needed(zp)
+        assert result.converted
+        md = Path(result.path).read_text()
+        assert "top level readme" in md
+        assert "Nested notes" in md
+        assert "docs/readme.txt" in md
+
+
 if __name__ == "__main__":
     test_basic_text_files()
     test_binary_files_skipped()
@@ -107,4 +136,6 @@ if __name__ == "__main__":
     test_not_a_zip()
     test_nested_office_files()
     test_file_count_limit()
+    test_zip_bomb_rejected()
+    test_nested_directory_structure()
     print("ALL TESTS PASSED")
