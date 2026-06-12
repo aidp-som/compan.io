@@ -15,22 +15,6 @@ from pathlib import Path
 
 from loguru import logger
 
-try:
-    import openpyxl
-except ImportError:
-    openpyxl = None  # type: ignore[assignment]
-
-try:
-    import docx as python_docx
-except ImportError:
-    python_docx = None  # type: ignore[assignment]
-
-try:
-    import pptx as python_pptx
-    from pptx.enum.shapes import MSO_SHAPE_TYPE as _MSO_SHAPE_TYPE
-except ImportError:
-    python_pptx = None  # type: ignore[assignment]
-    _MSO_SHAPE_TYPE = None  # type: ignore[assignment]
 
 _MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 _MAX_ROWS = 10_000
@@ -110,8 +94,10 @@ def _read_excel_sheets(wb, max_rows: int) -> tuple[list[str], int, bool]:
 
 
 def _convert_excel(file_path: Path) -> ConversionResult:
-    if openpyxl is None:
-        logger.debug("openpyxl not installed, skipping Excel conversion")
+    try:
+        import openpyxl
+    except ImportError:
+        logger.warning("openpyxl not installed — xlsx/xlsm conversion unavailable. Install: pip install openpyxl")
         return ConversionResult(path=str(file_path), original_path=str(file_path), converted=False, meta="library missing")
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -200,8 +186,10 @@ _HEADING_MAP = {
 
 
 def _convert_word(file_path: Path) -> ConversionResult:
-    if python_docx is None:
-        logger.debug("python-docx not installed, skipping Word conversion")
+    try:
+        import docx as python_docx
+    except ImportError:
+        logger.warning("python-docx not installed — docx conversion unavailable. Install: pip install python-docx")
         return ConversionResult(path=str(file_path), original_path=str(file_path), converted=False, meta="library missing")
 
     doc = python_docx.Document(str(file_path))
@@ -254,8 +242,11 @@ def _convert_word(file_path: Path) -> ConversionResult:
 # ---------------------------------------------------------------------------
 
 def _convert_ppt(file_path: Path) -> ConversionResult:
-    if python_pptx is None:
-        logger.debug("python-pptx not installed, skipping PPT conversion")
+    try:
+        import pptx as python_pptx
+        from pptx.enum.shapes import MSO_SHAPE_TYPE as _MSO_SHAPE_TYPE
+    except ImportError:
+        logger.warning("python-pptx not installed — pptx conversion unavailable. Install: pip install python-pptx")
         return ConversionResult(path=str(file_path), original_path=str(file_path), converted=False, meta="library missing")
 
     prs = python_pptx.Presentation(str(file_path))
