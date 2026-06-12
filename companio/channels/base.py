@@ -104,7 +104,7 @@ class BaseChannel(ABC):
                     OutboundMessage(
                         channel=self.name,
                         chat_id=str(chat_id),
-                        text="접근 권한이 없습니다. 관리자에게 문의하세요.",
+                        content="접근 권한이 없습니다. 관리자에게 문의하세요.",
                     )
                 )
             except Exception:
@@ -127,3 +127,10 @@ class BaseChannel(ABC):
     def is_running(self) -> bool:
         """Check if the channel is running."""
         return self._running
+
+    def get_health(self) -> dict[str, str | bool]:
+        """Return structured health status for IPC reporting."""
+        return {
+            "running": self._running,
+            "status": "connected" if self._running else "stopped",
+        }

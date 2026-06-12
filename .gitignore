@@ -12,3 +12,8 @@ build/
 .coverage
 htmlcov/
 docs/
+uv.lock
+
+# Tauri
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

@@ -41,20 +41,48 @@ class ChannelManager:
                 self.channels["telegram"] = TelegramChannel(
                     self.config.channels.telegram,
                     self.bus,
+                    workspace=self.config.workspace_path,
                 )
                 logger.info("Telegram channel enabled")
             except ImportError as e:
                 logger.warning("Telegram channel not available: {}", e)
+
+        # Slack channel
+        if self.config.channels.slack.enabled:
+            try:
+                from companio.channels.slack import SlackChannel
+
+                self.channels["slack"] = SlackChannel(
+                    self.config.channels.slack,
+                    self.bus,
+                    workspace=self.config.workspace_path,
+                )
+                logger.info("Slack channel enabled")
+            except ImportError as e:
+                logger.warning("Slack channel not available: {}", e)
 
         self._validate_allow_from()
 
     def _validate_allow_from(self) -> None:
         for name, ch in self.channels.items():
             if getattr(ch.config, "allow_from", None) == []:
-                raise SystemExit(
+                try:
+                    from companio.ipc import emit_event
+                    emit_event("error", {
+                        "code": "CONFIG_ALLOW_FROM_EMPTY",
+                        "message": f'"{name}" has empty allowFrom (denies all)',
+                        "fatal": True,
+                        "channel": name,
+                    })
+                except Exception:
+                    pass
+                import sys
+                print(
                     f'Error: "{name}" has empty allowFrom (denies all). '
-                    f'Set ["*"] to allow everyone, or add specific user IDs.'
+                    f'Set ["*"] to allow everyone, or add specific user IDs.',
+                    file=sys.stderr,
                 )
+                sys.exit(2)
 
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
@@ -136,6 +164,10 @@ class ChannelManager:
             name: {"enabled": True, "running": channel.is_running}
             for name, channel in self.channels.items()
         }
+
+    def get_health_all(self) -> dict[str, dict]:
+        """Get health status of all channels (for IPC reporting)."""
+        return {name: channel.get_health() for name, channel in self.channels.items()}
 
     @property
     def enabled_channels(self) -> list[str]:

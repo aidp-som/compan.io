@@ -31,7 +31,7 @@ class CronSchedule:
 class CronPayload:
     """What to do when the job runs."""
 
-    kind: Literal["system_event", "agent_turn"] = "agent_turn"
+    kind: Literal["system_event", "agent_turn", "message"] = "agent_turn"
     message: str = ""
     # Deliver response to channel
     deliver: bool = False
@@ -63,6 +63,7 @@ class CronJob:
     created_at_ms: int = 0
     updated_at_ms: int = 0
     delete_after_run: bool = False
+    created_by: str | None = None
 
 
 @dataclass
@@ -101,7 +102,17 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
             return int(next_dt.timestamp() * 1000)
-        except Exception:
+        except Exception as e:
+            # Silent failure here used to strand every cron job with
+            # nextRunAtMs=None (e.g. Windows hosts missing the tzdata
+            # package → ZoneInfoNotFoundError). Surface the reason.
+            logger.warning(
+                "Cron: failed to compute next run for expr={!r} tz={!r}: {}: {}",
+                schedule.expr,
+                schedule.tz,
+                type(e).__name__,
+                e,
+            )
             return None
 
     return None
@@ -180,6 +191,7 @@ class CronService:
                             created_at_ms=j.get("createdAtMs", 0),
                             updated_at_ms=j.get("updatedAtMs", 0),
                             delete_after_run=j.get("deleteAfterRun", False),
+                            created_by=j.get("createdBy"),
                         )
                     )
                 self._store = CronStore(jobs=jobs)
@@ -229,6 +241,7 @@ class CronService:
                     "createdAtMs": j.created_at_ms,
                     "updatedAtMs": j.updated_at_ms,
                     "deleteAfterRun": j.delete_after_run,
+                    "createdBy": j.created_by,
                 }
                 for j in self._store.jobs
             ],
@@ -374,6 +387,7 @@ class CronService:
         to: str | None = None,
         delete_after_run: bool = False,
         metadata: dict[str, Any] | None = None,
+        created_by: str | None = None,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
@@ -397,6 +411,7 @@ class CronService:
             created_at_ms=now,
             updated_at_ms=now,
             delete_after_run=delete_after_run,
+            created_by=created_by,
         )
 
         store.jobs.append(job)

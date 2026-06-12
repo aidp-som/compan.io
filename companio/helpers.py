@@ -55,6 +55,7 @@ _SECRET_PATTERNS = re.compile(
             r"xoxb-[0-9]+-[0-9]+-[a-zA-Z0-9]+",
             r"xoxp-[0-9]+-[0-9]+-[a-zA-Z0-9]+",
             r"xoxs-[0-9]+-[0-9]+-[a-zA-Z0-9]+",
+            r"xapp-[0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+",
             # AWS access key IDs
             r"AKIA[0-9A-Z]{16}",
             # Webhook secrets
@@ -144,6 +145,8 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
             _write(item, workspace / item.name)
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
+    _write(tpl / "memory" / "REQUESTS.md", workspace / "memory" / "REQUESTS.md")
+    _write(tpl / "memory" / "PROJECT.md", workspace / "memory" / "PROJECT.md")
     (workspace / "skills").mkdir(exist_ok=True)
     skills_tpl = tpl / "skills"
     if skills_tpl.is_dir():

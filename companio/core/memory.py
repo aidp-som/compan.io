@@ -81,10 +81,17 @@ class MemoryStore:
         current_memory = self.read_long_term()
         prompt = f"""You are a memory consolidation agent. Respond with ONLY valid JSON containing history_entry and memory_update fields. No markdown fences, no explanation.
 
+MEMORY POLICY (STRICT):
+- memory_update must stay UNDER 150 lines. If current memory exceeds this, actively trim operational data.
+- ALLOWED in memory_update: user identity, assistant role, user preferences, project basics (name/repo/stack), reference pointers to other workspace files, behavioral rules/guidelines.
+- FORBIDDEN in memory_update: dated events (e.g. "2026-05-18 confirmed"), request/task tracking tables, financial data, deployment/release history, meeting notes, API keys, code structure details, changing status values (진행중/완료/대기).
+- Decision rule: "Will this fact still be valid in 3 months?" If NO → history_entry only.
+- Operational events (requests, deployments, status changes, amounts) go ONLY in history_entry.
+
 Process this conversation and respond with ONLY a JSON object (no markdown, no explanation):
 
 {{"history_entry": "A paragraph (2-5 sentences) summarizing key events. Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
- "memory_update": "Full updated long-term memory as markdown. Include all existing facts plus new ones."}}
+ "memory_update": "Full updated long-term memory as markdown. ONLY persistent identity/role/preference/reference facts. Max 150 lines."}}
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}

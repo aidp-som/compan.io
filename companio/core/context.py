@@ -14,6 +14,9 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
+    _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+    _MEDIA_CONTEXT_OPEN = '<external-context trust="medium" source="channel-upload">'
+    _MEDIA_CONTEXT_CLOSE = "</external-context>"
 
     def __init__(self, workspace: Path, bot_name: str = "companio"):
         self.workspace = workspace
@@ -34,13 +37,82 @@ class ContextBuilder:
 
         return "\n\n---\n\n".join(parts)
 
-    def write_claude_md(self, project_dir: Path) -> None:
+    def write_claude_md(
+        self,
+        project_dir: Path,
+        disallowed_tools: list[str] | None = None,
+    ) -> None:
         """Write CLAUDE.md to the Claude CLI project directory.
 
         This file is read automatically by Claude CLI at session start,
         replacing the need for --append-system-prompt.
+
+        Args:
+            project_dir: Directory where CLAUDE.md will be written.
+            disallowed_tools: Tools blocked by role policy. When non-empty,
+                a [TOOL POLICY] section is appended so the model can fail
+                fast instead of searching for workarounds.
         """
+        import re
+
         content = self.build_system_prompt()
+
+        if disallowed_tools:
+            sanitized = [
+                t for t in disallowed_tools
+                if t and isinstance(t, str) and re.match(r"^[\w\-]+$", t)
+            ]
+            if sanitized:
+                tool_list = ", ".join(sanitized)
+                policy_parts = [
+                    "\n\n---\n\n"
+                    "## [TOOL POLICY]\n"
+                    f"The following tools are blocked by policy in this environment: {tool_list}.\n\n"
+                    "If a task requires any of these tools, immediately inform the user:\n"
+                    f'"이 작업은 현재 환경에서 사용할 수 없는 도구({tool_list})가 필요합니다. '
+                    '관리자에게 문의하거나 상위 권한으로 실행해 주세요."\n\n'
+                    "Do NOT attempt ANY workaround including but not limited to:\n"
+                    "- ToolSearch, Agent spawn, TaskCreate\n"
+                    "- Read/Glob/Grep to discover alternative paths\n"
+                    "- Write/Edit to create scripts for indirect execution\n"
+                    "- WebSearch or WebFetch for external tools\n"
+                    "- MCP tools (computer-use, etc.) for indirect shell access\n\n"
+                    "Stop immediately and report the limitation to the user."
+                ]
+
+                # Skill → required-tool mapping (hard deps only).
+                # SSOT: each skill's SKILL.md `requires.tools` frontmatter.
+                # When adding/removing skills, update BOTH this dict AND the
+                # corresponding SKILL.md. Future: parse frontmatter dynamically.
+                _SKILL_TOOL_DEPS: dict[str, list[str]] = {
+                    "claude-sync": ["Bash"],
+                    "git-workflow": ["Bash"],
+                    "md-to-pdf": ["Bash"],
+                    "setup-env": ["Bash"],
+                }
+                blocked_set = set(sanitized)
+                blocked_skills = [
+                    (skill, deps)
+                    for skill, deps in _SKILL_TOOL_DEPS.items()
+                    if any(d in blocked_set for d in deps)
+                ]
+                if blocked_skills:
+                    lines = [
+                        "\n\n### Blocked Skills\n"
+                        "The following skills require blocked tools and will NOT work "
+                        "in this environment. Do not invoke them via the Skill tool:\n"
+                    ]
+                    for skill, deps in blocked_skills:
+                        lines.append(f"- {skill} (requires: {', '.join(deps)})")
+                    lines.append(
+                        "\nIf the user requests one of these skills, explain that "
+                        "the skill requires elevated permissions (blocked tool) "
+                        "and cannot run in the current environment."
+                    )
+                    policy_parts.append("\n".join(lines))
+
+                content += "".join(policy_parts)
+
         claude_md = project_dir / "CLAUDE.md"
         claude_md.write_text(content, encoding="utf-8")
 
@@ -86,8 +158,10 @@ Your workspace is at: {workspace_path}
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
 - Ask for clarification when the request is ambiguous.
+- Work as a single agent by default. Only spawn subagents when the user explicitly requests multi-agent analysis (e.g. "딥다이브", "교차검증", "다중 에이전트"). Even then, never spawn more than 5 subagents total per request. PDF analysis, summaries, and standard reports must be handled directly without subagents.
+- If a tool call fails 3 times consecutively with the same error pattern, stop retrying immediately. Report the failure to the user with the tool name and error summary. Do not attempt alternative approaches for the same goal.
 
-Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+Reply directly with text for all responses. For scheduled tasks (cron), your response text is automatically delivered to the target channel — no additional tool call needed."""
 
     @staticmethod
     def _build_runtime_context(
@@ -109,8 +183,15 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 sender_parts.append(metadata["first_name"])
             if metadata.get("username"):
                 sender_parts.append(f"@{metadata['username']}")
+            if metadata.get("display_name"):
+                sender_parts.append(metadata["display_name"])
             if sender_parts:
-                lines.append(f"Sender: {' '.join(sender_parts)}")
+                line = f"Sender: {' '.join(sender_parts)}"
+                if metadata.get("user_id"):
+                    line += f" ({metadata['user_id']})"
+                lines.append(line)
+            elif metadata.get("user_id"):
+                lines.append(f"Sender: {metadata['user_id']}")
             if metadata.get("role_name"):
                 lines.append(f"Role: {metadata['role_name']}")
             if metadata.get("role_prompt"):
@@ -134,6 +215,35 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    @staticmethod
+    def format_media_tags(media: list[str]) -> str:
+        """Format media paths as an attachment block for Claude prompt injection.
+
+        Wraps one-per-line ``[image: /path]`` / ``[file: /path]`` tags in an
+        ``<external-context trust="medium" source="channel-upload">`` block so
+        the LLM can distinguish bot-injected attachments from text the user
+        may have typed (which might contain look-alike tags as prompt
+        injection). Filters out falsy entries (download failures leaving
+        empty paths) and de-duplicates while preserving order.
+
+        Returns an empty string when ``media`` is empty or contains only
+        falsy entries — callers can safely concatenate the result.
+        """
+        paths = [p for p in dict.fromkeys(media) if p]
+        if not paths:
+            return ""
+        lines = []
+        for path in paths:
+            ext = Path(path).suffix.lower()
+            tag = "image" if ext in ContextBuilder._IMAGE_EXTS else "file"
+            lines.append(f"[{tag}: {path}]")
+        body = "\n".join(lines)
+        return (
+            f"\n\n{ContextBuilder._MEDIA_CONTEXT_OPEN}\n"
+            f"{body}\n"
+            f"{ContextBuilder._MEDIA_CONTEXT_CLOSE}"
+        )
 
     @staticmethod
     def format_history(messages: list[dict]) -> str:

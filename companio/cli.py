@@ -1,6 +1,7 @@
 """CLI commands for companio."""
 
 import asyncio
+import json
 import os
 import select
 import signal
@@ -19,6 +20,7 @@ if sys.platform == "win32":
             pass
 
 import typer
+from loguru import logger
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -330,6 +332,7 @@ def gateway(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+    tauri: bool = typer.Option(False, "--tauri", help="Enable structured IPC output for Tauri desktop wrapper", hidden=True),
 ):
     """Start the companio gateway."""
     from companio.bus import MessageBus
@@ -359,9 +362,16 @@ def gateway(
 
     config = _load_runtime_config(config, workspace)
 
+    if tauri:
+        out = Console(stderr=True)
+        logger.remove()
+        logger.add(sys.stderr, serialize=True, level="INFO")
+    else:
+        out = console
+
     verify_claude_cli()  # fails fast if claude not installed
 
-    console.print(f"{__logo__} Starting companio gateway on port {port}...")
+    out.print(f"{__logo__} Starting companio gateway on port {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
 
@@ -369,10 +379,46 @@ def gateway(
 
     # Sync user-scope MCP servers from ~/.claude.json to project dir
     if sync_user_mcp_servers():
-        console.print("[green]✓[/green] Synced user MCP servers to project")
+        out.print("[green]✓[/green] Synced user MCP servers to project")
+
+    # Register crosspost MCP server if enabled
+    if config.crosspost.enabled:
+        from companio.config.paths import get_data_dir
+
+        project_dir = get_claude_project_dir()
+        mcp_json_path = project_dir / ".mcp.json"
+        mcp_config = json.loads(mcp_json_path.read_text()) if mcp_json_path.exists() else {}
+        mcp_servers = mcp_config.setdefault("mcpServers", {})
+
+        crosspost_config_path = get_data_dir() / "crosspost_routes.json"
+        crosspost_config_path.write_text(
+            json.dumps(
+                {"routes": {k: v.model_dump() for k, v in config.crosspost.routes.items()}},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        slack_token = ""
+        slack_cfg = getattr(config.channels, "slack", None)
+        if slack_cfg and getattr(slack_cfg, "bot_token", None):
+            slack_token = slack_cfg.bot_token
+
+        mcp_servers["crosspost"] = {
+            "type": "stdio",
+            "command": str(Path(sys.executable)),
+            "args": [str(Path(__file__).resolve().parent / "mcp" / "crosspost_server.py")],
+            "env": {
+                "CROSSPOST_TOKEN": slack_token,
+                "CROSSPOST_CONFIG_PATH": str(crosspost_config_path),
+            },
+        }
+        mcp_json_path.write_text(json.dumps(mcp_config, indent=2, ensure_ascii=False), encoding="utf-8")
+        out.print(f"[green]✓[/green] Crosspost MCP: {len(config.crosspost.routes)} channels registered")
 
     claude = ClaudeCLI(
         project_dir=get_claude_project_dir(),
+        workspace_dir=config.workspace_path,
         max_turns=config.claude.max_turns,
         timeout=config.claude.timeout,
         max_concurrent=config.claude.max_concurrent,
@@ -400,11 +446,45 @@ def gateway(
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
+        # Direct message delivery — bypasses Claude CLI entirely
+        if job.payload.kind == "message":
+            if job.payload.deliver and job.payload.to and job.payload.message:
+                from companio.bus import OutboundMessage
+
+                await bus.publish_outbound(
+                    OutboundMessage(
+                        channel=job.payload.channel or "cli",
+                        chat_id=job.payload.to,
+                        content=job.payload.message,
+                        metadata=job.payload.metadata or {},
+                    )
+                )
+            return job.payload.message
+
         reminder_note = (
             "[Scheduled Task] Timer finished.\n\n"
             f"Task '{job.name}' has been triggered.\n"
             f"Scheduled instruction: {job.payload.message}"
         )
+
+        cron_metadata: dict = {}
+
+        # 채널 히스토리 자동 주입 (payload.metadata.fetchChannelContext == true)
+        if (
+            job.payload.metadata.get("fetchChannelContext")
+            and job.payload.channel == "slack"
+            and job.payload.to
+        ):
+            slack_ch = channels.get_channel("slack")
+            if slack_ch and hasattr(slack_ch, "fetch_channel_context"):
+                limit = job.payload.metadata.get("channelContextLimit", 30)
+                ctx = await slack_ch.fetch_channel_context(job.payload.to, limit=limit)
+                if ctx:
+                    cron_metadata["_channel_context_text"] = ctx
+                    logger.info(
+                        "Cron {} injected channel context for {} ({} chars)",
+                        job.id, job.payload.to, len(ctx),
+                    )
 
         response = await agent.process_direct(
             reminder_note,
@@ -412,8 +492,13 @@ def gateway(
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
             ephemeral=True,
+            metadata=cron_metadata or None,
+            sender_id=job.created_by,
         )
 
+        # NOTE: MessageSender cannot be injected into Claude CLI subprocess.
+        # _sent_in_turn is always False. The fallback below is the only delivery path.
+        # If message tool injection is implemented later, review for double-send risk.
         if agent.message_sender._sent_in_turn:
             return response
 
@@ -430,35 +515,138 @@ def gateway(
             )
         return response
 
+    # Create channel manager (before assigning cron callback — on_cron_job
+    # references `channels` for channel context fetch)
+    channels = ChannelManager(config, bus)
     cron.on_job = on_cron_job
 
-    # Create channel manager
-    channels = ChannelManager(config, bus)
-
     if channels.enabled_channels:
-        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
+        out.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
-        console.print("[yellow]Warning: No channels enabled[/yellow]")
+        out.print("[yellow]Warning: No channels enabled[/yellow]")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+        out.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
     async def run():
+        shutdown_event = asyncio.Event()
+
+        if tauri:
+            from companio.ipc import emit_event
+
+            def _on_signal(signum, _frame):
+                emit_event("shutdown", {"reason": signal.Signals(signum).name, "exit_code": 0})
+                shutdown_event.set()
+
+            signal.signal(signal.SIGINT, _on_signal)
+            signal.signal(signal.SIGTERM, _on_signal)
+            if hasattr(signal, "SIGHUP"):
+                signal.signal(signal.SIGHUP, _on_signal)
+
         try:
             await cron.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+
+            if tauri:
+                from companio import __version__
+                from companio.ipc import emit_event
+
+                emit_event("ready", {
+                    "version": __version__,
+                    "pid": os.getpid(),
+                    "workspace": str(config.workspace_path),
+                })
+
+            if tauri:
+                async def _heartbeat():
+                    from companio.ipc import emit_event
+                    while not shutdown_event.is_set():
+                        emit_event("health", {
+                            "channels": channels.get_health_all(),
+                            "cron": cron.status(),
+                            "agent": {
+                                "running": agent._running,
+                                "active_tasks": agent.active_tasks_count,
+                            },
+                        })
+                        try:
+                            await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                            break
+                        except asyncio.TimeoutError:
+                            pass
+
+                heartbeat_task = asyncio.create_task(_heartbeat())
+                tasks = [
+                    asyncio.create_task(agent.run()),
+                    asyncio.create_task(channels.start_all()),
+                    asyncio.create_task(shutdown_event.wait()),
+                ]
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            else:
+                await asyncio.gather(
+                    agent.run(),
+                    channels.start_all(),
+                )
         except KeyboardInterrupt:
-            console.print("\nShutting down...")
+            out.print("\nShutting down...")
         finally:
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            if tauri:
+                from companio.ipc import emit_event
+                emit_event("shutdown", {"reason": "clean", "exit_code": 0})
 
     asyncio.run(run())
+
+
+@app.command("config-validate")
+def config_validate(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Validate a configuration file and output JSON result."""
+    import json as _json
+    from companio.config.loader import load_config
+
+    config_path = Path(config) if config else None
+    result: dict = {"valid": True, "errors": [], "warnings": []}
+
+    try:
+        # Explicitly check JSON syntax before calling load_config (which swallows errors)
+        if config_path is not None and config_path.exists():
+            with open(config_path, encoding="utf-8") as _f:
+                _json.load(_f)
+        cfg = load_config(config_path)
+    except (ValueError, Exception) as e:
+        result["valid"] = False
+        result["errors"].append(str(e))
+        print(_json.dumps(result))
+        raise typer.Exit(1)
+
+    # Check for common misconfigurations
+    if cfg.channels.telegram.enabled and not cfg.channels.telegram.token:
+        result["warnings"].append("Telegram enabled but token is empty")
+    if cfg.channels.slack.enabled and not cfg.channels.slack.bot_token:
+        result["warnings"].append("Slack enabled but bot_token is empty")
+    if cfg.channels.slack.enabled and not cfg.channels.slack.app_token:
+        result["warnings"].append("Slack enabled but app_token is empty")
+
+    # Check Claude CLI availability
+    try:
+        from companio.core.claude_cli import verify_claude_cli
+        verify_claude_cli()
+    except (RuntimeError, SystemExit):
+        result["warnings"].append("Claude CLI not found on PATH")
+
+    print(_json.dumps(result))
 
 
 # ============================================================================
@@ -501,6 +689,7 @@ def agent(
 
     claude = ClaudeCLI(
         project_dir=get_claude_project_dir(),
+        workspace_dir=config.workspace_path,
         max_turns=config.claude.max_turns,
         timeout=config.claude.timeout,
         max_concurrent=config.claude.max_concurrent,

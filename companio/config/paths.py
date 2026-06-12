@@ -41,19 +41,20 @@ def get_workspace_path(workspace: str | None = None) -> Path:
 
 
 def get_cli_history_path() -> Path:
-    """Return the shared CLI history file path."""
-    return Path.home() / ".companio" / "history" / "cli_history"
+    """Return the instance-level CLI history file path."""
+    return ensure_dir(get_data_dir() / "history") / "cli_history"
 
 
 
 def get_claude_project_dir() -> Path:
     """Return the Claude CLI project directory for companio.
 
-    This directory holds CLAUDE.md (system prompt) and is used as cwd
-    when spawning Claude CLI, keeping sessions isolated from the user's
-    own Claude Code usage.
+    This directory holds CLAUDE.md (system prompt) and .mcp.json,
+    and is used as cwd when spawning Claude CLI.
+    Uses the instance-level project/ directory so each instance
+    can have its own MCP servers and system prompt.
     """
-    return ensure_dir(Path.home() / ".companio" / "project")
+    return ensure_dir(get_data_dir() / "project")
 
 
 def get_legacy_sessions_dir() -> Path:

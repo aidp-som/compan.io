@@ -6,7 +6,9 @@ import asyncio
 import re
 import time
 import unicodedata
+from pathlib import Path
 
+import aiosqlite
 from loguru import logger
 from telegram import BotCommand, ReplyParameters, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -170,6 +172,7 @@ class TelegramChannel(BaseChannel):
         config: TelegramConfig,
         bus: MessageBus,
         groq_api_key: str = "",
+        workspace: Path | None = None,
     ):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
@@ -182,6 +185,8 @@ class TelegramChannel(BaseChannel):
         self._media_group_buffers: dict[str, dict] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
         self._message_threads: dict[tuple[str, int], int] = {}
+        self._workspace = workspace
+        self._user_db: aiosqlite.Connection | None = None
 
     def is_allowed(self, sender_id: str) -> bool:
         """Preserve Telegram's legacy id|username allowlist matching."""
@@ -197,10 +202,12 @@ class TelegramChannel(BaseChannel):
             return False
 
         sid, username = sender_str.split("|", 1)
-        if not sid.isdigit() or not username:
+        if not sid.isdigit():
             return False
 
-        return sid in allow_list or username in allow_list
+        if sid in allow_list:
+            return True
+        return bool(username) and username in allow_list
 
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -245,6 +252,34 @@ class TelegramChannel(BaseChannel):
             )
         )
 
+        # Handler for group membership events (join/leave) → user tracking
+        self._app.add_handler(
+            MessageHandler(
+                filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+                self._on_membership_update,
+            )
+        )
+
+        # Open DB for tracking group users
+        if self._workspace:
+            db_path = self._workspace / "companio.db"
+            self._user_db = await aiosqlite.connect(str(db_path))
+            await self._user_db.execute(
+                """CREATE TABLE IF NOT EXISTS telegram_users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    chat_id INTEGER,
+                    chat_title TEXT,
+                    chat_type TEXT,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            await self._user_db.commit()
+            logger.info("Telegram user tracking DB ready")
+
         logger.info("Starting Telegram bot (polling mode)...")
 
         # Initialize and start polling
@@ -286,12 +321,20 @@ class TelegramChannel(BaseChannel):
         self._media_group_tasks.clear()
         self._media_group_buffers.clear()
 
+        if self._user_db:
+            await self._user_db.close()
+            self._user_db = None
+
         if self._app:
             logger.info("Stopping Telegram bot...")
             await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
             self._app = None
+
+    def get_health(self) -> dict[str, str | bool]:
+        """Return health status for Telegram channel."""
+        return super().get_health()
 
     @staticmethod
     def _get_media_type(path: str) -> str:
@@ -358,6 +401,8 @@ class TelegramChannel(BaseChannel):
                         reply_parameters=reply_params,
                         **thread_kwargs,
                     )
+                if "/outbound/" in media_path:
+                    Path(media_path).unlink(missing_ok=True)
             except Exception as e:
                 filename = media_path.rsplit("/", 1)[-1]
                 logger.error("Failed to send media {}: {}", media_path, e)
@@ -535,6 +580,10 @@ class TelegramChannel(BaseChannel):
         chat_id = message.chat_id
         sender_id = self._sender_id(user)
         self._remember_thread_context(message)
+
+        # Track all users visible in group chat updates
+        if message.chat.type != "private" and self._user_db:
+            asyncio.create_task(self._track_group_users(message))
 
         # In group chats, only respond when bot is mentioned or replied to
         if message.chat.type != "private" and not self._is_bot_addressed(message):
@@ -723,6 +772,82 @@ class TelegramChannel(BaseChannel):
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
             pass
+
+    async def _on_membership_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle join/leave events to track group members."""
+        if update.message and update.message.chat.type != "private" and self._user_db:
+            await self._track_group_users(update.message)
+
+    async def _track_group_users(self, message) -> None:
+        """Extract and upsert every user visible in a group message update."""
+        if not self._user_db:
+            return
+        chat = message.chat
+        users_to_track: list[tuple] = []
+
+        def _add(u):
+            if u and not getattr(u, "is_bot", False):
+                users_to_track.append((
+                    u.id,
+                    getattr(u, "username", None),
+                    getattr(u, "first_name", None),
+                    getattr(u, "last_name", None),
+                    chat.id,
+                    getattr(chat, "title", None),
+                    chat.type,
+                ))
+
+        # 1. Message sender
+        _add(message.from_user)
+
+        # 2. Reply-to original author
+        if message.reply_to_message and message.reply_to_message.from_user:
+            _add(message.reply_to_message.from_user)
+
+        # 3. Forwarded message origin
+        if getattr(message, "forward_from", None):
+            _add(message.forward_from)
+
+        # 4. New members joining
+        for member in getattr(message, "new_chat_members", None) or []:
+            _add(member)
+
+        # 5. Member leaving
+        if getattr(message, "left_chat_member", None):
+            _add(message.left_chat_member)
+
+        # 6. First time seeing this group → fetch all admins
+        group_key = f"_seen_group_{chat.id}"
+        if not getattr(self, group_key, False) and self._app:
+            setattr(self, group_key, True)
+            try:
+                admins = await self._app.bot.get_chat_administrators(chat.id)
+                for admin in admins:
+                    _add(admin.user)
+            except Exception as e:
+                logger.debug("Failed to fetch admins for chat {}: {}", chat.id, e)
+
+        if not users_to_track:
+            return
+
+        try:
+            await self._user_db.executemany(
+                """INSERT INTO telegram_users
+                   (user_id, username, first_name, last_name, chat_id, chat_title, chat_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     username = COALESCE(excluded.username, telegram_users.username),
+                     first_name = COALESCE(excluded.first_name, telegram_users.first_name),
+                     last_name = COALESCE(excluded.last_name, telegram_users.last_name),
+                     chat_id = excluded.chat_id,
+                     chat_title = excluded.chat_title,
+                     chat_type = excluded.chat_type,
+                     last_seen = CURRENT_TIMESTAMP""",
+                users_to_track,
+            )
+            await self._user_db.commit()
+        except Exception as e:
+            logger.debug("Failed to track group users: {}", e)
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log polling / handler errors instead of silently swallowing them."""

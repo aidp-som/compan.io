@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>compan.io</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <section id="view-setup" class="setup-overlay" style="display: none;">
+    <div class="setup-content">
+      <h1 class="setup-title">compan.io Setup</h1>
+      <p class="setup-subtitle">Checking dependencies...</p>
+
+      <div id="setup-checks">
+        <div class="check-row" id="check-python">
+          <span class="check-dot"></span>
+          <div class="check-info">
+            <span class="check-name">Python 3.11+</span>
+            <span class="check-detail"></span>
+          </div>
+          <div class="check-actions" style="display: none;">
+            <code class="check-cmd"></code>
+            <button class="btn-copy" title="Copy command">Copy</button>
+            <button class="btn-terminal" title="Open Terminal">Open Terminal</button>
+          </div>
+        </div>
+
+        <div class="check-row" id="check-companio">
+          <span class="check-dot"></span>
+          <div class="check-info">
+            <span class="check-name">companio</span>
+            <span class="check-detail"></span>
+          </div>
+          <div class="check-actions" style="display: none;">
+            <button id="btn-install-companio" class="btn-install">Install</button>
+            <code class="check-cmd"></code>
+          </div>
+        </div>
+
+        <div class="check-row" id="check-claude">
+          <span class="check-dot"></span>
+          <div class="check-info">
+            <span class="check-name">Claude CLI</span>
+            <span class="check-detail"></span>
+          </div>
+          <div class="check-actions" style="display: none;">
+            <code class="check-cmd"></code>
+            <button class="btn-copy" title="Copy command">Copy</button>
+            <button class="btn-terminal" title="Open Terminal">Open Terminal</button>
+          </div>
+        </div>
+      </div>
+
+      <button id="btn-recheck" class="btn-recheck">Re-check Dependencies</button>
+    </div>
+  </section>
+
+  <nav id="tabs">
+    <button class="tab active" data-view="dashboard">Dashboard</button>
+    <button class="tab" data-view="logs">Logs</button>
+    <button class="tab" data-view="settings">Settings</button>
+    <button class="tab" data-view="files">Files</button>
+  </nav>
+
+  <main>
+    <section id="view-dashboard" class="view active">
+      <div id="status-badge" class="status stopped">
+        <span id="status-dot"></span>
+        <span id="status-text">Gateway Stopped</span>
+        <button id="btn-toggle">Start</button>
+      </div>
+      <div id="channels-list">
+        <h3>Channels</h3>
+        <div id="channels-container"><p class="muted">No channels configured</p></div>
+      </div>
+      <div id="stats">
+        <div class="stat"><span class="label">Cron</span><span id="cron-info">-</span></div>
+        <div class="stat"><span class="label">Uptime</span><span id="uptime">-</span></div>
+      </div>
+    </section>
+
+    <section id="view-logs" class="view">
+      <div id="log-toolbar">
+        <input id="log-filter" type="text" placeholder="Filter logs..." />
+        <select id="log-level">
+          <option value="DEBUG">DEBUG+</option>
+          <option value="INFO" selected>INFO+</option>
+          <option value="WARNING">WARNING+</option>
+          <option value="ERROR">ERROR+</option>
+        </select>
+        <button id="btn-clear-logs">Clear</button>
+      </div>
+      <pre id="log-output"></pre>
+    </section>
+
+    <section id="view-settings" class="view">
+      <form id="settings-form">
+        <fieldset>
+          <legend>Telegram</legend>
+          <label><input type="checkbox" id="tg-enabled" /> Enabled</label>
+          <label>Token <input type="password" id="tg-token" placeholder="123456789:ABC..." /></label>
+          <label>Allow From <input type="text" id="tg-allow" placeholder="user1, user2" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Slack</legend>
+          <label><input type="checkbox" id="slack-enabled" /> Enabled</label>
+          <label>Bot Token <input type="password" id="slack-bot-token" placeholder="xoxb-..." /></label>
+          <label>App Token <input type="password" id="slack-app-token" placeholder="xapp-..." /></label>
+          <label>Allow From <input type="text" id="slack-allow" placeholder="U12345, U67890" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Agent</legend>
+          <label>Bot Name <input type="text" id="bot-name" value="companio" /></label>
+          <label>Memory Window <input type="number" id="memory-window" value="200" /></label>
+        </fieldset>
+        <fieldset>
+          <legend>Paths (Advanced)</legend>
+          <p class="muted" style="margin-bottom: 8px; font-size: 12px;">Leave empty for auto-detection</p>
+          <label>Python <input type="text" id="path-python" placeholder="Auto-detect" /></label>
+          <label>companio <input type="text" id="path-companio" placeholder="Auto-detect" /></label>
+          <label>Claude CLI <input type="text" id="path-claude" placeholder="Auto-detect" /></label>
+        </fieldset>
+        <div class="form-actions">
+          <button type="submit" id="btn-save">Save</button>
+          <button type="button" id="btn-open-config">Edit as JSON</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="view-files" class="view">
+      <div id="file-tabs">
+        <button class="file-tab active" data-file="memory">MEMORY.md</button>
+        <button class="file-tab" data-file="history">HISTORY.md</button>
+      </div>
+      <pre id="file-content">Select a file to view.</pre>
+      <button id="btn-open-workspace">Open Workspace</button>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

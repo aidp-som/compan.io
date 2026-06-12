@@ -1,5 +1,7 @@
 import asyncio
 from collections import defaultdict
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -78,3 +80,25 @@ class TestSessionLocking:
         # b should finish first since it has shorter delay
         assert results[0] == "b"
         assert results[1] == "a"
+
+
+@pytest.fixture
+def agent(tmp_path):
+    from companio.bus import MessageBus
+    from companio.core.claude_cli import ClaudeCLI
+    from companio.core.loop import AgentLoop
+
+    bus = MessageBus()
+    claude = MagicMock(spec=ClaudeCLI)
+    return AgentLoop(bus=bus, claude=claude, workspace=tmp_path)
+
+
+class TestActiveTasksCount:
+    def test_active_tasks_count_empty(self, agent):
+        assert agent.active_tasks_count == 0
+
+    def test_active_tasks_count_with_tasks(self, agent):
+        import asyncio
+        agent._active_tasks["session1"] = [asyncio.Future(), asyncio.Future()]
+        agent._active_tasks["session2"] = [asyncio.Future()]
+        assert agent.active_tasks_count == 3

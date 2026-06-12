@@ -8,8 +8,10 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -178,12 +180,14 @@ class ClaudeCLI:
         self,
         *,
         project_dir: Path,
+        workspace_dir: Path | None = None,
         max_turns: int = 50,
         timeout: int = 300,
         max_concurrent: int = 5,
         model: str | None = None,
     ) -> None:
         self.project_dir = project_dir
+        self.workspace_dir = workspace_dir
         self.max_turns = max_turns
         self.timeout = timeout
         self.model = model
@@ -208,9 +212,11 @@ class ClaudeCLI:
             allowed_tools: Whitelist of tools (role-based access control).
             disallowed_tools: Blacklist of tools (role-based access control).
         """
-        cmd = ["claude", "-p", "--output-format", "json"]
+        claude_bin = shutil.which("claude") or "claude"
+        cmd = [claude_bin, "-p", "--output-format", "json"]
         cmd.extend(["--max-turns", str(self.max_turns)])
-        cmd.extend(["--add-dir", str(Path.home())])
+        if self.workspace_dir:
+            cmd.extend(["--add-dir", str(self.workspace_dir)])
 
         if self.model:
             cmd.extend(["--model", self.model])
@@ -229,25 +235,39 @@ class ClaudeCLI:
         # Always skip permissions — companio runs as an autonomous agent
         cmd.append("--dangerously-skip-permissions")
 
+        # Exclude user-level settings (plugins, MCP servers) — bot sessions
+        # must only use project-level config to prevent plugin leakage.
+        cmd.extend(["--setting-sources", "project,local"])
+
         return cmd
 
     async def _spawn(
-        self, cmd: list[str], message: str
+        self,
+        cmd: list[str],
+        message: str,
+        outbound_dir: str | None = None,
     ) -> tuple[int, str, str]:
         """Spawn the claude CLI process and return (returncode, stdout, stderr).
 
         Messages are passed via stdin for ARG_MAX safety and security.
-        Uses start_new_session=True for process group management.
+        On Unix, uses start_new_session=True for process group management.
+        On Windows, uses CREATE_NEW_PROCESS_GROUP for similar behavior.
         """
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        env = _filtered_env()
+        if outbound_dir:
+            env["COMPANIO_OUTBOUND_DIR"] = outbound_dir
+        kwargs: dict[str, Any] = dict(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_filtered_env(),
+            env=env,
             cwd=str(self.project_dir),
-            start_new_session=True,
         )
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(message.encode("utf-8")),
@@ -269,23 +289,35 @@ class ClaudeCLI:
 
     @staticmethod
     async def _kill_proc(proc: asyncio.subprocess.Process) -> None:
-        """Kill the process group: SIGTERM, wait 5s, then SIGKILL."""
+        """Kill the process (group). Uses platform-appropriate APIs."""
         if proc.pid is None:
             return
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            return
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            logger.warning("Process {} did not exit after SIGTERM, escalating to SIGKILL", proc.pid)
+        if sys.platform == "win32":
+            # Windows: terminate the process tree via taskkill
             try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                subprocess.call(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             except (ProcessLookupError, OSError):
                 pass
+        else:
+            # Unix: SIGTERM process group, then SIGKILL after timeout
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                return
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning("Process {} did not exit after SIGTERM, escalating to SIGKILL", proc.pid)
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
 
     async def run(
         self,
@@ -295,6 +327,7 @@ class ClaudeCLI:
         resume_session_id: str | None = None,
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
+        outbound_dir: str | None = None,
     ) -> ClaudeResponse:
         """Run a message through the Claude CLI and return parsed response.
 
@@ -317,7 +350,7 @@ class ClaudeCLI:
 
         async with self._semaphore:
             try:
-                returncode, stdout, stderr = await self._spawn(cmd, message)
+                returncode, stdout, stderr = await self._spawn(cmd, message, outbound_dir=outbound_dir)
             except asyncio.TimeoutError:
                 return ClaudeResponse(
                     result=f"Claude CLI timeout after {self.timeout}s",
