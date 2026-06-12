@@ -19,7 +19,10 @@ from loguru import logger
 _MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 _MAX_ROWS = 10_000
 _MAX_CHARS = 200_000
-_CONVERTIBLE_EXTS = frozenset({".xlsx", ".xlsm", ".docx", ".pptx"})
+_CONVERTIBLE_EXTS = frozenset({".xlsx", ".xlsm", ".docx", ".pptx", ".zip"})
+
+_MAX_ZIP_FILES = 50
+_MAX_ZIP_EXTRACTED_SIZE = 50 * 1024 * 1024  # 50 MB total extracted
 
 
 @dataclasses.dataclass
@@ -49,6 +52,8 @@ def convert_if_needed(file_path: Path) -> ConversionResult:
             return _convert_word(file_path)
         elif ext == ".pptx":
             return _convert_ppt(file_path)
+        elif ext == ".zip":
+            return _convert_zip(file_path)
     except Exception as e:
         logger.warning("File conversion failed for {}: {}", file_path.name, e)
 
@@ -298,6 +303,104 @@ def _convert_ppt(file_path: Path) -> ConversionResult:
     file_path.unlink(missing_ok=True)
 
     meta = f"{slide_count} slides"
+    logger.info("Converted {} → {} ({})", file_path.name, out_path.name, meta)
+    return ConversionResult(path=str(out_path), original_path=str(file_path), converted=True, meta=meta)
+
+
+# ---------------------------------------------------------------------------
+# Zip archive → Markdown (extract + convert each file)
+# ---------------------------------------------------------------------------
+
+def _convert_zip(file_path: Path) -> ConversionResult:
+    import tempfile
+    import zipfile
+
+    if not zipfile.is_zipfile(file_path):
+        return ConversionResult(path=str(file_path), original_path=str(file_path), converted=False, meta="not a valid zip")
+
+    lines: list[str] = [f"# {file_path.name}\n"]
+    file_count = 0
+    converted_count = 0
+    skipped: list[str] = []
+    text_exts = frozenset({".txt", ".csv", ".md", ".json", ".xml", ".yaml", ".yml", ".html", ".css", ".js", ".ts", ".py", ".sql", ".log", ".ini", ".cfg", ".toml", ".env", ".sh", ".bat"})
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                # Security: check total extracted size
+                total_size = sum(info.file_size for info in zf.infolist() if not info.is_dir())
+                if total_size > _MAX_ZIP_EXTRACTED_SIZE:
+                    return ConversionResult(
+                        path=str(file_path), original_path=str(file_path),
+                        converted=False, meta=f"extracted size too large ({total_size / 1024 / 1024:.1f} MB)",
+                    )
+
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    # Security: path traversal prevention
+                    if ".." in info.filename or info.filename.startswith("/"):
+                        logger.warning("Skipping suspicious zip entry: {}", info.filename)
+                        continue
+
+                    file_count += 1
+                    if file_count > _MAX_ZIP_FILES:
+                        skipped.append(info.filename)
+                        continue
+
+                    zf.extract(info, tmp_path)
+                    extracted = tmp_path / info.filename
+                    ext = extracted.suffix.lower()
+                    rel_name = info.filename
+
+                    lines.append(f"\n## {rel_name}\n")
+
+                    if ext in text_exts:
+                        try:
+                            text = extracted.read_text(encoding="utf-8", errors="replace")
+                            if len(text) > _MAX_CHARS // _MAX_ZIP_FILES:
+                                text = text[:_MAX_CHARS // _MAX_ZIP_FILES] + "\n... (잘림)"
+                            lines.append(text)
+                            converted_count += 1
+                        except Exception:
+                            lines.append("[텍스트 읽기 실패]")
+                    elif ext in (".xlsx", ".xlsm", ".docx", ".pptx"):
+                        result = convert_if_needed(extracted)
+                        if result.converted:
+                            try:
+                                md_content = Path(result.path).read_text(encoding="utf-8")
+                                # Remove the redundant top-level heading from sub-conversion
+                                md_content = md_content.split("\n", 1)[-1] if md_content.startswith("# ") else md_content
+                                lines.append(md_content)
+                                converted_count += 1
+                            except Exception:
+                                lines.append(f"[변환 실패: {rel_name}]")
+                        else:
+                            lines.append(f"[변환 불가: {result.meta or ext}]")
+                    elif ext == ".pdf":
+                        lines.append("[PDF 파일 — Claude Read 도구로 직접 읽기 가능]")
+                    else:
+                        lines.append(f"[바이너리 파일 생략: {ext}]")
+
+        except zipfile.BadZipFile:
+            return ConversionResult(path=str(file_path), original_path=str(file_path), converted=False, meta="corrupted zip")
+
+    if skipped:
+        lines.append(f"\n---\n\n{len(skipped)}개 파일 추가 (제한 초과로 생략): {', '.join(skipped[:10])}")
+        if len(skipped) > 10:
+            lines.append(f"... 외 {len(skipped) - 10}개")
+
+    content = "\n".join(lines)
+    content = _truncate_chars(content)
+
+    out_path = file_path.parent / f"{file_path.name}.md"
+    out_path.write_text(content, encoding="utf-8")
+    file_path.unlink(missing_ok=True)
+
+    meta = f"{file_count} files, {converted_count} converted"
+    if skipped:
+        meta += f", {len(skipped)} skipped"
     logger.info("Converted {} → {} ({})", file_path.name, out_path.name, meta)
     return ConversionResult(path=str(out_path), original_path=str(file_path), converted=True, meta=meta)
 
