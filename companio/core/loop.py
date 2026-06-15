@@ -135,6 +135,18 @@ PULSE_INTERVAL_SECONDS = 5
 PULSE_MAX_COUNT = 4
 PULSE_TEXT_FORMAT = "\uc0dd\uac01 \uc911... (\uc57d {n}\ucd08)"
 
+_TOOL_LABELS = {
+    "Read": "\ud30c\uc77c \ud655\uc778",
+    "Write": "\ud30c\uc77c \uc791\uc131",
+    "Edit": "\ud30c\uc77c \uc218\uc815",
+    "Bash": "\uba85\ub839 \uc2e4\ud589",
+    "Glob": "\ud30c\uc77c \uac80\uc0c9",
+    "Grep": "\ucf54\ub4dc \uac80\uc0c9",
+    "WebSearch": "\uc6f9 \uac80\uc0c9",
+    "WebFetch": "\uc6f9 \uc870\ud68c",
+    "Agent": "\uc11c\ube0c\uc5d0\uc774\uc804\ud2b8 \uc2e4\ud589",
+}
+
 
 class AgentLoop:
     """Delegates processing to Claude CLI subprocess."""
@@ -268,27 +280,66 @@ class AgentLoop:
             return False
         return self._slack_progress_pulse_enabled
 
-    async def _progress_pulse_loop(self, msg: InboundMessage) -> None:
-        """Send up to PULSE_MAX_COUNT progress updates at PULSE_INTERVAL_SECONDS intervals.
+    def _make_progress_callback(self, msg: InboundMessage):
+        """Create a progress callback that sends stream events to Slack as progress updates."""
+        if not self._should_start_pulse(msg):
+            return None
 
-        Each pulse re-publishes a `_progress=True` OutboundMessage with increasing
-        elapsed-time text. SlackChannel's `_progress_messages` cache routes these to
-        `chat.update`, so no new sending code is needed.
-        """
-        try:
-            for i in range(1, PULSE_MAX_COUNT + 1):
-                await asyncio.sleep(PULSE_INTERVAL_SECONDS)
-                elapsed = i * PULSE_INTERVAL_SECONDS
-                await self.bus.publish_outbound(
-                    OutboundMessage.reply_to_inbound(
-                        msg,
-                        PULSE_TEXT_FORMAT.format(n=elapsed),
-                        extra_metadata={"_progress": True},
-                    )
+        steps: list[str] = []
+        last_update = 0.0
+        start_time = asyncio.get_event_loop().time()
+        THROTTLE_SECONDS = 4.0
+
+        async def callback(event: dict) -> None:
+            nonlocal last_update
+            now = asyncio.get_event_loop().time()
+
+            if event.get("type") == "assistant":
+                message = event.get("message", {})
+                for block in message.get("content", []):
+                    if block.get("type") == "tool_use":
+                        tool_name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        # Map tool name to Korean label
+                        label = _TOOL_LABELS.get(tool_name, tool_name)
+                        # Add context from tool input
+                        detail = ""
+                        if "file_path" in tool_input:
+                            fname = tool_input["file_path"].rsplit("/", 1)[-1]
+                            detail = f" (`{fname}`)"
+                        elif "command" in tool_input:
+                            cmd_preview = tool_input["command"][:30]
+                            detail = f" (`{cmd_preview}`)"
+                        steps.append(f"{label}{detail}")
+
+            # Throttle Slack updates
+            if now - last_update < THROTTLE_SECONDS:
+                return
+            if not steps:
+                return
+            last_update = now
+
+            elapsed = int(now - start_time)
+            elapsed_str = f"{elapsed // 60}분 {elapsed % 60}초" if elapsed >= 60 else f"{elapsed}초"
+
+            done = steps[:-1] if len(steps) > 1 else []
+            current = steps[-1] if steps else ""
+
+            lines = [f"🔄 작업 진행 중 — {len(steps)}단계"]
+            for s in done[-4:]:
+                lines.append(f"  ✅ {s}")
+            if current:
+                lines.append(f"  🔄 {current}...")
+            lines.append(f"⏱ 경과: {elapsed_str}")
+
+            text = "\n".join(lines)
+            await self.bus.publish_outbound(
+                OutboundMessage.reply_to_inbound(
+                    msg, text, extra_metadata={"_progress": True}
                 )
-        except asyncio.CancelledError:
-            # Cancelled when the response arrives, an error fires, or /stop is invoked.
-            pass
+            )
+
+        return callback
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process under per-session lock.
@@ -440,29 +491,14 @@ class AgentLoop:
                 msg, "\uc0dd\uac01 \uc911...", extra_metadata={"_progress": True}
             )
         )
-
-        # Start progress pulse loop (Slack only, opt-in via config flag).
-        # Lifecycle is managed here — _dispatch is intentionally not touched so
-        # this stays orthogonal to WO-P1-01's ACK reaction work.
-        pulse_task: asyncio.Task | None = None
-        if self._should_start_pulse(msg):
-            pulse_task = asyncio.create_task(self._progress_pulse_loop(msg))
-
-        try:
-            return await self._process_message_inner(msg, session, key)
-        finally:
-            if pulse_task is not None:
-                pulse_task.cancel()
-                try:
-                    await pulse_task
-                except asyncio.CancelledError:
-                    pass
+        progress_cb = self._make_progress_callback(msg)
+        return await self._process_message_inner(msg, session, key, progress_cb=progress_cb)
 
     async def _process_message_inner(
-        self, msg: InboundMessage, session: Session, key: str
+        self, msg: InboundMessage, session: Session, key: str,
+        progress_cb=None,
     ) -> OutboundMessage | None:
-        """Inner processing body. Split out so the pulse task in `_process_message`
-        can wrap it in try/finally without inflating the diff."""
+        """Inner processing body."""
         # Resolve role-based tool restrictions
         role_name, role = self._resolve_role(msg.sender_id)
         role_tools: dict = {}
@@ -554,6 +590,7 @@ class AgentLoop:
             response = await self.claude.run(
                 message=full_message, resume_session_id=claude_sid,
                 outbound_dir=str(session_outbound),
+                progress_callback=progress_cb,
                 **role_tools,
             )
             # Resume failed — fallback to new session
@@ -583,6 +620,7 @@ class AgentLoop:
                 message=full_message,
                 session_id=new_session_id,
                 outbound_dir=str(session_outbound),
+                progress_callback=progress_cb,
                 **role_tools,
             )
 

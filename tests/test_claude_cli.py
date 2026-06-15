@@ -129,7 +129,8 @@ class TestBuildCmd:
     def test_basic(self, tmp_path):
         cli = self._make_cli(tmp_path)
         cmd = cli._build_cmd()
-        assert cmd[:4] == ["claude", "-p", "--output-format", "json"]
+        assert cmd[0].endswith("claude")
+        assert cmd[1:5] == ["-p", "--output-format", "stream-json", "--verbose"]
         assert "--max-turns" in cmd
         idx = cmd.index("--max-turns")
         assert cmd[idx + 1] == "50"
@@ -195,7 +196,7 @@ class TestClaudeCLIRun:
             }
         )
 
-        async def fake_spawn(cmd, message):
+        async def fake_spawn(cmd, message, **kwargs):
             return (0, response_json, "")
 
         cli = ClaudeCLI(project_dir=tmp_path)
@@ -206,7 +207,7 @@ class TestClaudeCLIRun:
 
     @pytest.mark.asyncio
     async def test_process_error_nonzero_exit(self, monkeypatch, tmp_path):
-        async def fake_spawn(cmd, message):
+        async def fake_spawn(cmd, message, **kwargs):
             return (1, "", "something went wrong")
 
         cli = ClaudeCLI(project_dir=tmp_path)
@@ -217,7 +218,7 @@ class TestClaudeCLIRun:
 
     @pytest.mark.asyncio
     async def test_timeout(self, monkeypatch, tmp_path):
-        async def fake_spawn(cmd, message):
+        async def fake_spawn(cmd, message, **kwargs):
             raise asyncio.TimeoutError()
 
         cli = ClaudeCLI(project_dir=tmp_path)
@@ -228,7 +229,7 @@ class TestClaudeCLIRun:
 
     @pytest.mark.asyncio
     async def test_cancelled_error(self, monkeypatch, tmp_path):
-        async def fake_spawn(cmd, message):
+        async def fake_spawn(cmd, message, **kwargs):
             raise asyncio.CancelledError()
 
         cli = ClaudeCLI(project_dir=tmp_path)
@@ -239,7 +240,7 @@ class TestClaudeCLIRun:
 
     @pytest.mark.asyncio
     async def test_empty_stdout_exit_zero(self, monkeypatch, tmp_path):
-        async def fake_spawn(cmd, message):
+        async def fake_spawn(cmd, message, **kwargs):
             return (0, "", "")
 
         cli = ClaudeCLI(project_dir=tmp_path)
@@ -253,7 +254,7 @@ class TestClaudeCLIRun:
         call_count = 0
         max_concurrent = 0
 
-        async def fake_spawn(cmd, message):
+        async def fake_spawn(cmd, message, **kwargs):
             nonlocal call_count, max_concurrent
             call_count += 1
             max_concurrent = max(max_concurrent, call_count)
