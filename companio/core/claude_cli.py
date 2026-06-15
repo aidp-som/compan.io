@@ -11,7 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -213,7 +213,7 @@ class ClaudeCLI:
             disallowed_tools: Blacklist of tools (role-based access control).
         """
         claude_bin = shutil.which("claude") or "claude"
-        cmd = [claude_bin, "-p", "--output-format", "json"]
+        cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose"]
         cmd.extend(["--max-turns", str(self.max_turns)])
         if self.workspace_dir:
             cmd.extend(["--add-dir", str(self.workspace_dir)])
@@ -246,8 +246,14 @@ class ClaudeCLI:
         cmd: list[str],
         message: str,
         outbound_dir: str | None = None,
+        progress_callback: Callable[[dict], Awaitable[None]] | None = None,
     ) -> tuple[int, str, str]:
-        """Spawn the claude CLI process and return (returncode, stdout, stderr).
+        """Spawn the claude CLI process and stream events line-by-line.
+
+        Returns (returncode, result_json_str, stderr_str).
+        ``result_json_str`` contains ONLY the final ``type: "result"`` event so
+        that callers (``run()``) can keep using ``ClaudeResponse.from_json()``
+        without changes.
 
         Messages are passed via stdin for ARG_MAX safety and security.
         On Unix, uses start_new_session=True for process group management.
@@ -262,15 +268,67 @@ class ClaudeCLI:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=str(self.project_dir),
+            limit=4 * 1024 * 1024,  # 4MB — stream-json init events can exceed the 64KB default
         )
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
         proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
+
+        async def _stream_loop() -> str:
+            """Read stdout line-by-line, invoke callback, return result JSON."""
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+
+            # Write message then close stdin so the CLI starts processing.
+            proc.stdin.write(message.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
+
+            result_json: str = ""
+
+            while True:
+                line_bytes = await proc.stdout.readline()
+                if not line_bytes:
+                    break  # EOF
+                line = line_bytes.decode("utf-8", errors="replace").rstrip("\n\r")
+                if not line:
+                    continue
+
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug("Non-JSON stream line: {}", line[:200])
+                    continue
+
+                event_type = event.get("type", "unknown")
+                logger.debug("Stream event: type={}", event_type)
+
+                # Capture session_id early from the init event.
+                if event_type == "init" and "session_id" in event:
+                    logger.debug("Stream init session_id={}", event.get("session_id"))
+
+                # Fire progress callback for every parsed event.
+                if progress_callback is not None:
+                    try:
+                        await progress_callback(event)
+                    except Exception:
+                        logger.opt(exception=True).warning(
+                            "progress_callback raised for event type={}",
+                            event_type,
+                        )
+
+                # Collect the final result event.
+                if event_type == "result":
+                    result_json = line
+
+            return result_json
+
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(message.encode("utf-8")),
+            result_json = await asyncio.wait_for(
+                _stream_loop(),
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
@@ -282,10 +340,18 @@ class ClaudeCLI:
             await self._kill_proc(proc)
             raise
 
-        returncode = proc.returncode if proc.returncode is not None else -1
-        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        # Read any remaining stderr after stdout is done.
+        stderr_bytes = await proc.stderr.read() if proc.stderr else b""
         stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-        return (returncode, stdout, stderr)
+
+        await proc.wait()
+        returncode = proc.returncode if proc.returncode is not None else -1
+
+        # Edge case: process exited without emitting a "result" event.
+        if not result_json:
+            logger.warning("Claude CLI exited without a 'type: result' event")
+
+        return (returncode, result_json, stderr)
 
     @staticmethod
     async def _kill_proc(proc: asyncio.subprocess.Process) -> None:
@@ -328,6 +394,7 @@ class ClaudeCLI:
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         outbound_dir: str | None = None,
+        progress_callback: Callable[[dict], Awaitable[None]] | None = None,
     ) -> ClaudeResponse:
         """Run a message through the Claude CLI and return parsed response.
 
@@ -350,7 +417,10 @@ class ClaudeCLI:
 
         async with self._semaphore:
             try:
-                returncode, stdout, stderr = await self._spawn(cmd, message, outbound_dir=outbound_dir)
+                returncode, stdout, stderr = await self._spawn(
+                    cmd, message, outbound_dir=outbound_dir,
+                    progress_callback=progress_callback,
+                )
             except asyncio.TimeoutError:
                 return ClaudeResponse(
                     result=f"Claude CLI timeout after {self.timeout}s",
