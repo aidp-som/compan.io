@@ -218,7 +218,6 @@ _HEADER_MAX_LEN = 150
 _SECTION_MAX_LEN = 3000
 
 
-
 _PIPE_TABLE_RE = re.compile(r"^\s*\|.+\|", re.MULTILINE)
 _PIPE_SEP_RE = re.compile(r"^\s*\|[\s:_-]+\|", re.MULTILINE)
 
@@ -910,7 +909,7 @@ class SlackChannel(BaseChannel):
         )
 
     async def _send_ack_reaction(self, chat_id: str, message_ts: str) -> None:
-        """Schedule a 👀 reaction add for (chat_id, message_ts), idempotent.
+        """Schedule a reaction add for (chat_id, message_ts), idempotent.
 
         Runs lock-protected only for the bookkeeping; the actual API call happens
         inside the asyncio.Task so it never blocks the inbound dispatch path
@@ -1463,7 +1462,7 @@ class SlackChannel(BaseChannel):
             metadata["_thread_context_text"] = thread_context_text
             metadata["_thread_context_chars"] = thread_context_chars
 
-        # Fire-and-store the 👀 ack outside any per-session lock so direct-prior
+        # Fire-and-store the ack outside any per-session lock so direct-prior
         # work in flight cannot delay the user-visible reaction (04-plan §1.2).
         if self._should_send_ack(message_ts):
             asyncio.create_task(self._send_ack_reaction(chat_id, message_ts))

@@ -72,7 +72,7 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.companio/workspace"
-    memory_window: int = 50
+    memory_window: int = 200
     bot_name: str = "companio"  # Customizable bot identity name
     idle_consolidation_timeout: int = 1800  # 30분, 0이면 비활성화
     idle_consolidation_min_turns: int = 4  # 최소 턴 수
