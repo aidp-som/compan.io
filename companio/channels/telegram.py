@@ -849,6 +849,82 @@ class TelegramChannel(BaseChannel):
         except Exception as e:
             logger.debug("Failed to track group users: {}", e)
 
+    async def _on_membership_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle join/leave events to track group members."""
+        if update.message and update.message.chat.type != "private" and self._user_db:
+            await self._track_group_users(update.message)
+
+    async def _track_group_users(self, message) -> None:
+        """Extract and upsert every user visible in a group message update."""
+        if not self._user_db:
+            return
+        chat = message.chat
+        users_to_track: list[tuple] = []
+
+        def _add(u):
+            if u and not getattr(u, "is_bot", False):
+                users_to_track.append((
+                    u.id,
+                    getattr(u, "username", None),
+                    getattr(u, "first_name", None),
+                    getattr(u, "last_name", None),
+                    chat.id,
+                    getattr(chat, "title", None),
+                    chat.type,
+                ))
+
+        # 1. Message sender
+        _add(message.from_user)
+
+        # 2. Reply-to original author
+        if message.reply_to_message and message.reply_to_message.from_user:
+            _add(message.reply_to_message.from_user)
+
+        # 3. Forwarded message origin
+        if getattr(message, "forward_from", None):
+            _add(message.forward_from)
+
+        # 4. New members joining
+        for member in getattr(message, "new_chat_members", None) or []:
+            _add(member)
+
+        # 5. Member leaving
+        if getattr(message, "left_chat_member", None):
+            _add(message.left_chat_member)
+
+        # 6. First time seeing this group → fetch all admins
+        group_key = f"_seen_group_{chat.id}"
+        if not getattr(self, group_key, False) and self._app:
+            setattr(self, group_key, True)
+            try:
+                admins = await self._app.bot.get_chat_administrators(chat.id)
+                for admin in admins:
+                    _add(admin.user)
+            except Exception as e:
+                logger.debug("Failed to fetch admins for chat {}: {}", chat.id, e)
+
+        if not users_to_track:
+            return
+
+        try:
+            await self._user_db.executemany(
+                """INSERT INTO telegram_users
+                   (user_id, username, first_name, last_name, chat_id, chat_title, chat_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     username = COALESCE(excluded.username, telegram_users.username),
+                     first_name = COALESCE(excluded.first_name, telegram_users.first_name),
+                     last_name = COALESCE(excluded.last_name, telegram_users.last_name),
+                     chat_id = excluded.chat_id,
+                     chat_title = excluded.chat_title,
+                     chat_type = excluded.chat_type,
+                     last_seen = CURRENT_TIMESTAMP""",
+                users_to_track,
+            )
+            await self._user_db.commit()
+        except Exception as e:
+            logger.debug("Failed to track group users: {}", e)
+
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log polling / handler errors instead of silently swallowing them."""
         logger.error("Telegram error: {}", context.error)

@@ -15,7 +15,6 @@ from pathlib import Path
 
 from loguru import logger
 
-
 _MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
 _MAX_ROWS = 10_000
 _MAX_CHARS = 200_000

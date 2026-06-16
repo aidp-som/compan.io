@@ -153,7 +153,7 @@ class TestLoopBroadcastIntegration:
             # _process_message_inner returns None when _sent_in_turn is True.
             original_inner = loop._process_message_inner
 
-            async def fake_inner(inbound, session, key):
+            async def fake_inner(inbound, session, key, progress_cb=None):
                 await original_inner(inbound, session, key)
                 loop.message_sender._sent_in_turn = True
                 return None

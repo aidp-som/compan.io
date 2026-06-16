@@ -294,8 +294,8 @@ class TestSlackProgressCache:
         assert update_kwargs["ts"] == "posted-ts"
         assert update_kwargs["channel"] == "C1"
 
-    async def test_progress_without_thread_ts_always_posts_fresh(self):
-        """DM safety — no cache key collapse to `chat_id:` that could collide."""
+    async def test_progress_without_thread_ts_updates_in_place(self):
+        """DM progress uses stable 'bare:{chat_id}' cache key for in-place updates."""
         channel, client = _build_slack_channel()
 
         dm_msg_1 = OutboundMessage(
@@ -309,12 +309,11 @@ class TestSlackProgressCache:
         await channel.send(dm_msg_1)
         await channel.send(dm_msg_2)
 
-        # Both posted fresh, neither updated
-        assert client.chat_postMessage.call_count == 2
-        assert client.chat_update.call_count == 0
-        # No cache entry leaked under a collapsed key
-        assert "D1:" not in channel._progress_messages
-        assert "D1:None" not in channel._progress_messages
+        # First posts fresh, second updates in place
+        assert client.chat_postMessage.call_count == 1
+        assert client.chat_update.call_count == 1
+        # Cache key uses bare:{chat_id} pattern
+        assert "bare:D1" in channel._progress_messages
 
     async def test_progress_cache_isolated_by_thread(self):
         channel, client = _build_slack_channel()
