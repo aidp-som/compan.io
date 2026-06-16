@@ -3,7 +3,29 @@
 import json
 from pathlib import Path
 
+from loguru import logger
+
 from companio.config.schema import Config
+
+# Slack fields that should be present in the raw config for operational clarity.
+# Missing fields still work (Pydantic fills schema defaults), but a warning
+# nudges operators toward explicit configuration.
+_SLACK_RECOMMENDED: set[str] = {
+    "blockKit",
+    "respondInThread",
+    "ackReactionsEnabled",
+    "broadcastEnabled",
+    "threadContextEnabled",
+}
+
+# Schema defaults to show in the warning message (camelCase key -> default value)
+_SLACK_DEFAULTS: dict[str, str] = {
+    "blockKit": "auto",
+    "respondInThread": "true",
+    "ackReactionsEnabled": "true",
+    "broadcastEnabled": "true",
+    "threadContextEnabled": "true",
+}
 
 # Global variable to store current config path (for multi-instance support)
 _current_config_path: Path | None = None
@@ -31,6 +53,30 @@ def load_dotenv_if_exists(config_dir: Path) -> None:
         load_dotenv(env_file)
 
 
+def warn_missing_recommended(data: dict) -> list[str]:
+    """Check raw config dict for missing recommended Slack fields.
+
+    Inspects the JSON data *before* Pydantic fills defaults so operators
+    are aware when they rely on implicit values.
+
+    Returns:
+        List of human-readable warning strings (empty when all present).
+    """
+    slack = data.get("channels", {}).get("slack", {})
+    if not slack:
+        return []
+
+    warnings: list[str] = []
+    for field in sorted(_SLACK_RECOMMENDED):
+        if field not in slack:
+            default = _SLACK_DEFAULTS.get(field, "N/A")
+            warnings.append(
+                f"Slack config missing recommended field '{field}' "
+                f'(will use schema default: "{default}")'
+            )
+    return warnings
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from file or create default.
@@ -51,6 +97,11 @@ def load_config(config_path: Path | None = None) -> Config:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             data = _migrate_config(data)
+
+            # Warn about recommended fields missing from the raw config
+            for msg in warn_missing_recommended(data):
+                logger.warning(msg)
+
             return Config.model_validate(data)
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
@@ -88,4 +139,8 @@ def _migrate_config(data: dict) -> dict:
         data["claude"].pop("allowedTools", None)
     if "gateway" in data:
         data["gateway"].pop("heartbeat", None)
+    # Backfill block_kit for configs predating Block Kit feature
+    slack = data.get("channels", {}).get("slack", {})
+    if slack and "blockKit" not in slack and "block_kit" not in slack:
+        slack["blockKit"] = "auto"
     return data

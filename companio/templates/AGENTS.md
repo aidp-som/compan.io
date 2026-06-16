@@ -306,3 +306,16 @@ companio agent --logs                           # Show runtime logs
 companio gateway --port 8080                    # Custom gateway port
 companio gateway --verbose                      # Verbose logging
 ```
+
+## 설정 자가진단
+
+사용자가 "내 설정 확인해줘", "설정 진단", "config check" 등을 요청하면 다음을 수행한다:
+
+1. Read 도구로 config.json을 읽고 주요 설정값 보고:
+   - channels.slack.blockKit 값 (표 렌더링 모드)
+   - channels.slack.allowFrom 화이트리스트
+   - claude.maxTurns / claude.timeout
+   - claude.model
+   - agents.defaults.botName
+2. 누락된 권장 필드가 있으면 경고
+3. 현재 메모리 파일(MEMORY.md) 줄 수 보고 (150줄 제한 대비)

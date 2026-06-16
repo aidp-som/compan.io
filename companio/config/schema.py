@@ -38,7 +38,7 @@ class SlackConfig(Base):
     """Slack channel configuration (Socket Mode)."""
 
     enabled: bool = False
-    block_kit: str = "false"  # "auto" | "true" | "false"
+    block_kit: str = "auto"  # "auto" | "true" | "false"
     bot_token: str = ""  # xoxb-... Bot User OAuth Token
     app_token: str = ""  # xapp-... App-Level Token for Socket Mode
     allow_from: list[str] = Field(default_factory=list)  # Slack user IDs (e.g. ["U12345678"])

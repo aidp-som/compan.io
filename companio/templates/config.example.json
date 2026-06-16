@@ -19,6 +19,22 @@
       "allowFrom": [],
       "proxy": null,
       "replyToMessage": false
+    },
+    "slack": {
+      "enabled": false,
+      "blockKit": "auto",
+      "botToken": "",
+      "appToken": "",
+      "allowFrom": [],
+      "respondInThread": true,
+      "ackReactionsEnabled": true,
+      "progressPulseEnabled": true,
+      "broadcastEnabled": true,
+      "broadcastBlockedChannels": [],
+      "threadContextEnabled": true,
+      "threadContextDefaultLimit": 20,
+      "threadContextMaxLimit": 200,
+      "threadContextBlockedChannels": []
     }
   },
   "gateway": {
