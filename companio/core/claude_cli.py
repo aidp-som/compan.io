@@ -268,7 +268,7 @@ class ClaudeCLI:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=str(self.project_dir),
-            limit=4 * 1024 * 1024,  # 4MB — stream-json init events can exceed the 64KB default
+            limit=32 * 1024 * 1024,  # 32MB — stream-json events with PDF/media content can be very large
         )
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -290,7 +290,18 @@ class ClaudeCLI:
             result_json: str = ""
 
             while True:
-                line_bytes = await proc.stdout.readline()
+                try:
+                    line_bytes = await proc.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    # Line exceeds StreamReader limit — drain and skip
+                    logger.warning("Stream line exceeded buffer limit, draining")
+                    try:
+                        await proc.stdout.readuntil(b"\n")
+                    except Exception:
+                        chunk = await proc.stdout.read(1024 * 1024)
+                        if not chunk:
+                            break
+                    continue
                 if not line_bytes:
                     break  # EOF
                 line = line_bytes.decode("utf-8", errors="replace").rstrip("\n\r")
