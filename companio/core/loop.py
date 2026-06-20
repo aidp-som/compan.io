@@ -805,7 +805,7 @@ class AgentLoop:
         ephemeral: bool = False,
         metadata: dict | None = None,
         sender_id: str | None = None,
-    ) -> str:
+    ) -> OutboundMessage | None:
         """Process a message directly (for CLI or cron usage).
 
         Args:
@@ -824,5 +824,4 @@ class AgentLoop:
                 self._claude_session_ids.pop(msg.session_key, None)
                 self._claude_session_costs.pop(msg.session_key, None)
                 await self._session_manager.clear(msg.session_key)
-            response = await self._process_message(msg)
-            return response.content if response else ""
+            return await self._process_message(msg)

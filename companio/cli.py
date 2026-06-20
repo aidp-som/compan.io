@@ -486,7 +486,7 @@ def gateway(
                         job.id, job.payload.to, len(ctx),
                     )
 
-        response = await agent.process_direct(
+        result = await agent.process_direct(
             reminder_note,
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
@@ -496,24 +496,28 @@ def gateway(
             sender_id=job.created_by,
         )
 
+        response_text = result.content if result else ""
+        response_media = result.media if result else []
+
         # NOTE: MessageSender cannot be injected into Claude CLI subprocess.
         # _sent_in_turn is always False. The fallback below is the only delivery path.
         # If message tool injection is implemented later, review for double-send risk.
         if agent.message_sender._sent_in_turn:
-            return response
+            return response_text
 
-        if job.payload.deliver and job.payload.to and response:
+        if job.payload.deliver and job.payload.to and (response_text or response_media):
             from companio.bus import OutboundMessage
 
             await bus.publish_outbound(
                 OutboundMessage(
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to,
-                    content=response,
+                    content=response_text,
+                    media=response_media,
                     metadata=job.payload.metadata or {},
                 )
             )
-        return response
+        return response_text
 
     # Create channel manager (before assigning cron callback — on_cron_job
     # references `channels` for channel context fetch)
@@ -728,10 +732,10 @@ def agent(
         # Single message mode -- direct call, no bus needed
         async def run_once():
             with _thinking_ctx():
-                response = await agent_loop.process_direct(
+                result = await agent_loop.process_direct(
                     message, session_id
                 )
-            _print_agent_response(response, render_markdown=markdown)
+            _print_agent_response(result.content if result else "", render_markdown=markdown)
 
         asyncio.run(run_once())
     else:
